@@ -96,7 +96,7 @@ function fetchQuotes(auth, symbols) {
   });
 }
 
-function process(quotes) {
+function processData(quotes) {
   const now = Date.now();
   const stocks = quotes.map(q => {
     const v = q.v || {};
@@ -169,7 +169,7 @@ const server = http.createServer(async (req, res) => {
     if (!auth) return res.end(JSON.stringify({error:"No token"}));
     try {
       const q = await fetchQuotes(auth, FNO_SYMBOLS);
-      const data = process(q);
+      const data = processData(q);
       res.writeHead(200,{"Content-Type":"application/json"});
       res.end(JSON.stringify(data));
     } catch(e) {
