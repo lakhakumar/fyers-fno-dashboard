@@ -181,5 +181,9 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end("Not found");
 });
 
+// -------- Start server (Render compatible) --------
 const port = process.env.PORT || 3000;
-server.listen(port, () => console.log(`Dashboard running on port ${port}`));
+
+server.listen(port, () => {
+  console.log(`Dashboard running on port ${port}`);
+});
