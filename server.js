@@ -84,7 +84,7 @@ const SECTOR_MAP = {
   "TMPV":"Auto","360ONE":"Finance","COCHINSHIP":"Defence","ATHERENERG":"Auto"
 };
 
-let rankHistory = {};   // name -> [{t, g, l}]
+let rankHistory = {};
 let lastSnapshot = 0;
 let backfillDone = false;
 let backfillInProgress = false;
@@ -94,7 +94,6 @@ function getISTNow() {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
 }
 
-/** Market open 09:15 – 15:40 IST (as per your note) */
 function isMarketOpen() {
   const d = getISTNow();
   const day = d.getDay();
@@ -103,18 +102,14 @@ function isMarketOpen() {
   return mins >= (9 * 60 + 15) && mins <= (15 * 60 + 40);
 }
 
-/** Last trading session date YYYY-MM-DD */
 function getHistoryDate() {
   const d = getISTNow();
   let dt = new Date(d);
   const day = dt.getDay();
   const mins = dt.getHours() * 60 + dt.getMinutes();
-
   if (day === 0) dt.setDate(dt.getDate() - 2);
   else if (day === 6) dt.setDate(dt.getDate() - 1);
-  else if (mins < 9 * 60 + 15) {
-    dt.setDate(dt.getDate() - (day === 1 ? 3 : 1));
-  }
+  else if (mins < 9 * 60 + 15) dt.setDate(dt.getDate() - (day === 1 ? 3 : 1));
   return dt.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
@@ -139,7 +134,7 @@ function httpsGet(auth, urlPath) {
       });
     });
     req.on("error", () => resolve(null));
-    req.setTimeout(15000, () => { req.destroy(); resolve(null); });
+    req.setTimeout(12000, () => { req.destroy(); resolve(null); });
     req.end();
   });
 }
@@ -161,14 +156,15 @@ async function fetchHistory5(auth, symbol, day) {
   return j.candles.map(c => ({ epoch: c[0], close: c[4] }));
 }
 
+// Background only — never blocks the HTTP response
 async function backfillRanks(auth, prevCloseMap) {
   if (backfillDone || backfillInProgress) return;
   backfillInProgress = true;
   const day = getHistoryDate();
-  console.log("Backfill for", day);
+  console.log("Background backfill start:", day);
 
   try {
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 6;
     const histBySymbol = {};
 
     for (let i = 0; i < FNO_SYMBOLS.length; i += CONCURRENCY) {
@@ -183,10 +179,16 @@ async function backfillRanks(auth, prevCloseMap) {
     const epochSet = new Set();
     Object.values(histBySymbol).forEach(arr => arr.forEach(c => epochSet.add(c.epoch)));
     const epochs = Array.from(epochSet).sort((a, b) => a - b);
-    console.log("Unique 5-min bars:", epochs.length, "symbols with data:", Object.keys(histBySymbol).length);
+    console.log("Bars:", epochs.length, "symbols:", Object.keys(histBySymbol).length);
 
-    // Clear old history for clean rebuild
-    rankHistory = {};
+    if (epochs.length === 0) {
+      console.log("No history candles — skip");
+      backfillInProgress = false;
+      return;
+    }
+
+    // Build into a temporary object, then replace (never leave empty)
+    const newHistory = {};
 
     epochs.forEach(epoch => {
       const t = epochToTimeLabel(epoch);
@@ -207,14 +209,21 @@ async function backfillRanks(auth, prevCloseMap) {
       byLoss.forEach((r, i) => { lossRank[r.name] = i + 1; });
 
       Object.keys(gainRank).forEach(name => {
-        if (!rankHistory[name]) rankHistory[name] = [];
-        rankHistory[name].push({ t, g: gainRank[name], l: lossRank[name] });
+        if (!newHistory[name]) newHistory[name] = [];
+        newHistory[name].push({ t, g: gainRank[name], l: lossRank[name] });
       });
     });
 
-    Object.keys(rankHistory).forEach(n => rankHistory[n].sort((a, b) => a.t.localeCompare(b.t)));
-    backfillDone = true;
-    console.log("Backfill complete");
+    Object.keys(newHistory).forEach(n => newHistory[n].sort((a, b) => a.t.localeCompare(b.t)));
+
+    // Only replace when we have real data
+    if (Object.keys(newHistory).length > 20) {
+      rankHistory = newHistory;
+      backfillDone = true;
+      console.log("Backfill applied, stocks with history:", Object.keys(rankHistory).length);
+    } else {
+      console.log("Backfill too thin, keeping previous history");
+    }
   } catch (e) {
     console.error("Backfill error:", e.message);
   } finally {
@@ -225,18 +234,18 @@ async function backfillRanks(auth, prevCloseMap) {
 function processData(quotes, indexQuotes) {
   const marketOpen = isMarketOpen();
   const stocks = [];
-  const prevCloseMap = {};
 
   quotes.forEach(q => {
     const v = q.v || {};
     const name = (q.n || "").replace("NSE:", "").replace("-EQ", "");
     const ltp = Number(v.lp) || 0;
-    const prev = Number(v.prev_close_price) || 0;
-    if (ltp <= 0) return;
-    prevCloseMap[name] = prev;
+    // Accept LTP or previous close so after-hours still shows stocks
+    const price = ltp > 0 ? ltp : (Number(v.prev_close_price) || 0);
+    if (price <= 0) return;
     stocks.push({
-      symbol: q.n, name,
-      ltp: +ltp.toFixed(2),
+      symbol: q.n,
+      name,
+      ltp: +(ltp || price).toFixed(2),
       ch: +(Number(v.ch) || 0).toFixed(2),
       chp: +(Number(v.chp) || 0).toFixed(2),
       sector: SECTOR_MAP[name] || "Others"
@@ -248,7 +257,7 @@ function processData(quotes, indexQuotes) {
   byGain.forEach((s, i) => (s.rankG = i + 1));
   byLoss.forEach((s, i) => (s.rankL = i + 1));
 
-  // Live snapshot ONLY when market is open
+  // Live snapshot only when market is open
   if (marketOpen) {
     const now = Date.now();
     const tNow = getISTNow().toLocaleTimeString("en-IN", {
@@ -265,7 +274,6 @@ function processData(quotes, indexQuotes) {
     }
   }
 
-  // Attach full history to every stock (fill blanks with – on frontend)
   stocks.forEach(s => {
     s.hist = rankHistory[s.name] || [];
     if (s.hist.length) {
@@ -287,13 +295,11 @@ function processData(quotes, indexQuotes) {
     sec[s.sector].n++;
     sec[s.sector].list.push(s);
   });
-
-  // All sectors descending by avg %
   const sectors = Object.entries(sec)
     .map(([name, v]) => ({
       name,
       avg: +(v.sum / v.n).toFixed(2),
-      stocks: v.list.sort((a, b) => b.chp - a.chp) // highest % → lowest %
+      stocks: v.list.sort((a, b) => b.chp - a.chp)
     }))
     .sort((a, b) => b.avg - a.avg);
 
@@ -345,20 +351,22 @@ const server = http.createServer(async (req, res) => {
         fetchQuotes(auth, INDEX_SYMBOLS)
       ]);
 
-      const prevCloseMap = {};
-      stockQuotes.forEach(q => {
-        const name = (q.n || "").replace("NSE:", "").replace("-EQ", "");
-        prevCloseMap[name] = Number(q.v?.prev_close_price) || 0;
-      });
-
-      if (!backfillDone && !backfillInProgress) {
-        await backfillRanks(auth, prevCloseMap);
-      }
-
+      // Always return live data first (never block)
       const data = processData(stockQuotes, indexQuotes);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(data));
+
+      // Start history build in background (does not block UI)
+      if (!backfillDone && !backfillInProgress) {
+        const prevCloseMap = {};
+        stockQuotes.forEach(q => {
+          const name = (q.n || "").replace("NSE:", "").replace("-EQ", "");
+          prevCloseMap[name] = Number(q.v?.prev_close_price) || 0;
+        });
+        backfillRanks(auth, prevCloseMap); // no await
+      }
     } catch (e) {
+      console.error(e);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
     }
