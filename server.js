@@ -84,63 +84,38 @@ const SECTOR_MAP = {
   "TMPV":"Auto","360ONE":"Finance","COCHINSHIP":"Defence","ATHERENERG":"Auto"
 };
 
-let rankHistory = {};
+let rankHistory = {};   // name -> [{t, g, l}]
 let lastSnapshot = 0;
 let backfillDone = false;
 let backfillInProgress = false;
 const SNAPSHOT_MS = 5 * 60 * 1000;
 
-function httpsGet(auth, urlPath) {
-  return new Promise((resolve) => {
-    const opts = {
-      hostname: "api-t1.fyers.in",
-      path: urlPath,
-      method: "GET",
-      headers: { Authorization: auth }
-    };
-    const req = https.request(opts, res => {
-      let d = "";
-      res.on("data", c => d += c);
-      res.on("end", () => {
-        try { resolve(JSON.parse(d)); }
-        catch (e) { resolve(null); }
-      });
-    });
-    req.on("error", () => resolve(null));
-    req.setTimeout(12000, () => { req.destroy(); resolve(null); });
-    req.end();
-  });
+function getISTNow() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
 }
 
-function fetchQuotes(auth, symbols) {
-  return new Promise(async (resolve) => {
-    const results = [];
-    for (let i = 0; i < symbols.length; i += 50) {
-      const batch = symbols.slice(i, i + 50);
-      const j = await httpsGet(auth, `/data/quotes?symbols=${batch.join(",")}`);
-      if (j && j.s === "ok" && Array.isArray(j.d)) results.push(...j.d);
-    }
-    resolve(results);
-  });
+/** Market open 09:15 – 15:40 IST (as per your note) */
+function isMarketOpen() {
+  const d = getISTNow();
+  const day = d.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = d.getHours() * 60 + d.getMinutes();
+  return mins >= (9 * 60 + 15) && mins <= (15 * 60 + 40);
 }
 
-/** Last trading day in IST (handles weekends & pre-open) */
+/** Last trading session date YYYY-MM-DD */
 function getHistoryDate() {
-  const istStr = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
-  const ist = new Date(istStr);
-  let d = new Date(ist);
-  const day = d.getDay();   // 0=Sun … 6=Sat
-  const hour = d.getHours();
-  const min = d.getMinutes();
+  const d = getISTNow();
+  let dt = new Date(d);
+  const day = dt.getDay();
+  const mins = dt.getHours() * 60 + dt.getMinutes();
 
-  // Weekend
-  if (day === 0) d.setDate(d.getDate() - 2);          // Sun → Fri
-  else if (day === 6) d.setDate(d.getDate() - 1);     // Sat → Fri
-  // Before market open (~9:15)
-  else if (hour < 9 || (hour === 9 && min < 15)) {
-    d.setDate(d.getDate() - (day === 1 ? 3 : 1));     // Mon morning → Fri
+  if (day === 0) dt.setDate(dt.getDate() - 2);
+  else if (day === 6) dt.setDate(dt.getDate() - 1);
+  else if (mins < 9 * 60 + 15) {
+    dt.setDate(dt.getDate() - (day === 1 ? 3 : 1));
   }
-  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
+  return dt.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
 function epochToTimeLabel(epochSec) {
@@ -149,10 +124,39 @@ function epochToTimeLabel(epochSec) {
   });
 }
 
+function httpsGet(auth, urlPath) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: "api-t1.fyers.in",
+      path: urlPath,
+      method: "GET",
+      headers: { Authorization: auth }
+    }, res => {
+      let d = "";
+      res.on("data", c => d += c);
+      res.on("end", () => {
+        try { resolve(JSON.parse(d)); } catch (e) { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.setTimeout(15000, () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+async function fetchQuotes(auth, symbols) {
+  const results = [];
+  for (let i = 0; i < symbols.length; i += 50) {
+    const batch = symbols.slice(i, i + 50);
+    const j = await httpsGet(auth, `/data/quotes?symbols=${batch.join(",")}`);
+    if (j && j.s === "ok" && Array.isArray(j.d)) results.push(...j.d);
+  }
+  return results;
+}
+
 async function fetchHistory5(auth, symbol, day) {
-  const pathStr =
-    `/data/history?symbol=${encodeURIComponent(symbol)}&resolution=5&date_format=1&range_from=${day}&range_to=${day}&cont_flag=1`;
-  const j = await httpsGet(auth, pathStr);
+  const p = `/data/history?symbol=${encodeURIComponent(symbol)}&resolution=5&date_format=1&range_from=${day}&range_to=${day}&cont_flag=1`;
+  const j = await httpsGet(auth, p);
   if (!j || j.s !== "ok" || !Array.isArray(j.candles)) return [];
   return j.candles.map(c => ({ epoch: c[0], close: c[4] }));
 }
@@ -161,7 +165,7 @@ async function backfillRanks(auth, prevCloseMap) {
   if (backfillDone || backfillInProgress) return;
   backfillInProgress = true;
   const day = getHistoryDate();
-  console.log("Backfill start for date:", day);
+  console.log("Backfill for", day);
 
   try {
     const CONCURRENCY = 8;
@@ -179,7 +183,10 @@ async function backfillRanks(auth, prevCloseMap) {
     const epochSet = new Set();
     Object.values(histBySymbol).forEach(arr => arr.forEach(c => epochSet.add(c.epoch)));
     const epochs = Array.from(epochSet).sort((a, b) => a - b);
-    console.log("Candles found, unique times:", epochs.length);
+    console.log("Unique 5-min bars:", epochs.length, "symbols with data:", Object.keys(histBySymbol).length);
+
+    // Clear old history for clean rebuild
+    rankHistory = {};
 
     epochs.forEach(epoch => {
       const t = epochToTimeLabel(epoch);
@@ -189,33 +196,25 @@ async function backfillRanks(auth, prevCloseMap) {
         if (!candle) return;
         const prev = prevCloseMap[name];
         if (!prev || prev <= 0) return;
-        const chp = ((candle.close - prev) / prev) * 100;
-        rows.push({ name, chp });
+        rows.push({ name, chp: ((candle.close - prev) / prev) * 100 });
       });
-      if (rows.length < 5) return;
+      if (rows.length < 10) return;
 
-      rows.sort((a, b) => b.chp - a.chp);
-      const gainRank = {};
-      rows.forEach((r, i) => { gainRank[r.name] = i + 1; });
-
-      rows.sort((a, b) => a.chp - b.chp);
-      const lossRank = {};
-      rows.forEach((r, i) => { lossRank[r.name] = i + 1; });
+      const byGain = [...rows].sort((a, b) => b.chp - a.chp);
+      const byLoss = [...rows].sort((a, b) => a.chp - b.chp);
+      const gainRank = {}, lossRank = {};
+      byGain.forEach((r, i) => { gainRank[r.name] = i + 1; });
+      byLoss.forEach((r, i) => { lossRank[r.name] = i + 1; });
 
       Object.keys(gainRank).forEach(name => {
         if (!rankHistory[name]) rankHistory[name] = [];
-        if (!rankHistory[name].some(x => x.t === t)) {
-          rankHistory[name].push({ t, g: gainRank[name], l: lossRank[name] });
-        }
+        rankHistory[name].push({ t, g: gainRank[name], l: lossRank[name] });
       });
     });
 
-    Object.keys(rankHistory).forEach(name => {
-      rankHistory[name].sort((a, b) => a.t.localeCompare(b.t));
-    });
-
+    Object.keys(rankHistory).forEach(n => rankHistory[n].sort((a, b) => a.t.localeCompare(b.t)));
     backfillDone = true;
-    console.log("Backfill done. Sample times:", Object.values(rankHistory)[0]?.map(x => x.t).slice(0, 5));
+    console.log("Backfill complete");
   } catch (e) {
     console.error("Backfill error:", e.message);
   } finally {
@@ -224,7 +223,7 @@ async function backfillRanks(auth, prevCloseMap) {
 }
 
 function processData(quotes, indexQuotes) {
-  const now = Date.now();
+  const marketOpen = isMarketOpen();
   const stocks = [];
   const prevCloseMap = {};
 
@@ -236,8 +235,7 @@ function processData(quotes, indexQuotes) {
     if (ltp <= 0) return;
     prevCloseMap[name] = prev;
     stocks.push({
-      symbol: q.n,
-      name,
+      symbol: q.n, name,
       ltp: +ltp.toFixed(2),
       ch: +(Number(v.ch) || 0).toFixed(2),
       chp: +(Number(v.chp) || 0).toFixed(2),
@@ -250,25 +248,33 @@ function processData(quotes, indexQuotes) {
   byGain.forEach((s, i) => (s.rankG = i + 1));
   byLoss.forEach((s, i) => (s.rankL = i + 1));
 
-  // ALWAYS add current live snapshot (so at least 1 time column exists)
-  const tNow = new Date().toLocaleTimeString("en-IN", {
-    hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata"
-  });
-  if (now - lastSnapshot >= SNAPSHOT_MS || lastSnapshot === 0) {
-    lastSnapshot = now;
-    stocks.forEach(s => {
-      if (!rankHistory[s.name]) rankHistory[s.name] = [];
-      if (!rankHistory[s.name].some(x => x.t === tNow)) {
-        rankHistory[s.name].push({ t: tNow, g: s.rankG, l: s.rankL });
-      }
+  // Live snapshot ONLY when market is open
+  if (marketOpen) {
+    const now = Date.now();
+    const tNow = getISTNow().toLocaleTimeString("en-IN", {
+      hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata"
     });
+    if (now - lastSnapshot >= SNAPSHOT_MS || lastSnapshot === 0) {
+      lastSnapshot = now;
+      stocks.forEach(s => {
+        if (!rankHistory[s.name]) rankHistory[s.name] = [];
+        if (!rankHistory[s.name].some(x => x.t === tNow)) {
+          rankHistory[s.name].push({ t: tNow, g: s.rankG, l: s.rankL });
+        }
+      });
+    }
   }
 
+  // Attach full history to every stock (fill blanks with – on frontend)
   stocks.forEach(s => {
-    const h = rankHistory[s.name] || [];
-    s.hist = h;
-    s.diffG = h.length ? h[0].g - s.rankG : 0;
-    s.diffL = h.length ? h[0].l - s.rankL : 0;
+    s.hist = rankHistory[s.name] || [];
+    if (s.hist.length) {
+      s.diffG = s.hist[0].g - s.rankG;
+      s.diffL = s.hist[0].l - s.rankL;
+    } else {
+      s.diffG = 0;
+      s.diffL = 0;
+    }
   });
 
   const advances = stocks.filter(s => s.chp > 0).length;
@@ -281,20 +287,17 @@ function processData(quotes, indexQuotes) {
     sec[s.sector].n++;
     sec[s.sector].list.push(s);
   });
+
+  // All sectors descending by avg %
   const sectors = Object.entries(sec)
     .map(([name, v]) => ({
       name,
       avg: +(v.sum / v.n).toFixed(2),
-      stocks: v.list.sort((a, b) => b.chp - a.chp)
+      stocks: v.list.sort((a, b) => b.chp - a.chp) // highest % → lowest %
     }))
-    .sort((a, b) => {
-      if (a.avg >= 0 && b.avg >= 0) return b.avg - a.avg;
-      if (a.avg < 0 && b.avg < 0) return a.avg - b.avg;
-      return b.avg - a.avg;
-    });
+    .sort((a, b) => b.avg - a.avg);
 
-  let nifty = { lp: 0, chp: 0 };
-  let banknifty = { lp: 0, chp: 0 };
+  let nifty = { lp: 0, chp: 0 }, banknifty = { lp: 0, chp: 0 };
   (indexQuotes || []).forEach(q => {
     const v = q.v || {};
     if ((q.n || "").includes("NIFTY50")) nifty = { lp: +(Number(v.lp) || 0).toFixed(1), chp: +(Number(v.chp) || 0).toFixed(2) };
@@ -306,6 +309,8 @@ function processData(quotes, indexQuotes) {
   const allTimes = Array.from(timeSet).sort();
 
   return {
+    marketOpen,
+    historyDate: getHistoryDate(),
     nifty, banknifty,
     advances, declines,
     total: stocks.length,
@@ -314,8 +319,7 @@ function processData(quotes, indexQuotes) {
     sectors,
     times: allTimes,
     backfillDone,
-    backfillInProgress,
-    historyDate: getHistoryDate()
+    backfillInProgress
   };
 }
 
@@ -341,14 +345,12 @@ const server = http.createServer(async (req, res) => {
         fetchQuotes(auth, INDEX_SYMBOLS)
       ]);
 
-      // Build prevClose map for backfill
       const prevCloseMap = {};
       stockQuotes.forEach(q => {
         const name = (q.n || "").replace("NSE:", "").replace("-EQ", "");
         prevCloseMap[name] = Number(q.v?.prev_close_price) || 0;
       });
 
-      // Await backfill on first request so columns appear immediately
       if (!backfillDone && !backfillInProgress) {
         await backfillRanks(auth, prevCloseMap);
       }
@@ -366,4 +368,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-server.listen(port, () => console.log(`Dashboard on port ${port}`));
+server.listen(port, () => console.log("Dashboard on port", port));
