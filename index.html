@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <title>F&O Live Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0b1120; --card: #1e293b; --text: #e2e8f0; --muted: #94a3b8;
+      --green: #22c55e; --red: #ef4444; --blue: #3b82f6; --border: #334155;
+      --header: #0f172a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; padding-bottom: 40px;
+    }
+    /* Login Overlay */
+    #loginOverlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.92);
+      display: flex; align-items: center; justify-content: center; z-index: 9999;
+    }
+    #loginOverlay.hidden { display: none; }
+    .login-box {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 28px 24px; width: 92%; max-width: 400px;
+    }
+    .login-box h2 { margin-bottom: 6px; font-size: 1.3rem; }
+    .login-box p { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+    .login-box label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px; }
+    .login-box input {
+      width: 100%; padding: 11px 12px; border-radius: 8px;
+      border: 1px solid var(--border); background: #0f172a;
+      color: var(--text); font-size: 0.95rem; margin-bottom: 14px;
+    }
+    .login-box button {
+      width: 100%; padding: 12px; border: none; border-radius: 8px;
+      background: var(--blue); color: white; font-weight: 600; font-size: 1rem; cursor: pointer;
+    }
+    .login-error { color: var(--red); font-size: 0.85rem; margin-top: 10px; text-align: center; }
+
+    /* Header */
+    header {
+      background: var(--header); padding: 14px 16px;
+      border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
+    }
+    .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .header-top h1 { font-size: 1.15rem; }
+    .adv-dec { display: flex; gap: 14px; font-size: 0.9rem; }
+    .adv { color: var(--green); font-weight: 600; }
+    .dec { color: var(--red); font-weight: 600; }
+    .status-bar { font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
+
+    /* Tabs */
+    .tabs {
+      display: flex; background: var(--card); border-bottom: 1px solid var(--border);
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    .tab {
+      flex: 1; min-width: 100px; text-align: center; padding: 12px 8px;
+      font-size: 0.9rem; font-weight: 500; color: var(--muted); cursor: pointer;
+      border-bottom: 3px solid transparent; white-space: nowrap;
+    }
+    .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+    /* Content */
+    .tab-content { display: none; padding: 12px; }
+    .tab-content.active { display: block; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; min-width: 700px; }
+    th, td { padding: 9px 8px; text-align: left; white-space: nowrap; }
+    th {
+      background: #1e293b; color: var(--muted); font-weight: 500;
+      position: sticky; top: 0; border-bottom: 1px solid var(--border);
+    }
+    td { border-bottom: 1px solid #1e293b; }
+    tr:last-child td { border-bottom: none; }
+    .rank { font-weight: 700; color: var(--muted); width: 36px; }
+    .name { font-weight: 600; }
+    .ltp { font-variant-numeric: tabular-nums; }
+    .chp.pos { color: var(--green); }
+    .chp.neg { color: var(--red); }
+    .diff.pos { color: var(--green); }
+    .diff.neg { color: var(--red); }
+    .hist { color: var(--muted); font-size: 0.75rem; }
+
+    /* Sector Chart */
+    .chart-box {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px; margin-top: 8px;
+    }
+    .chart-box h3 { font-size: 0.95rem; margin-bottom: 12px; color: var(--muted); }
+
+    @media (max-width: 480px) {
+      table { font-size: 0.78rem; }
+      th, td { padding: 7px 5px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- LOGIN OVERLAY -->
+  <div id="loginOverlay">
+    <div class="login-box">
+      <h2>F&O Live Dashboard</h2>
+      <p>Enter Fyers credentials to continue</p>
+      <label>App ID</label>
+      <input type="text" id="appId" placeholder="XXXXXX-100" autocomplete="off"/>
+      <label>Access Token</label>
+      <input type="password" id="accessToken" placeholder="Paste access token" autocomplete="off"/>
+      <button onclick="doLogin()">Login & Start Dashboard</button>
+      <div class="login-error" id="loginError"></div>
+    </div>
+  </div>
+
+  <!-- MAIN DASHBOARD -->
+  <div id="dashboard" style="display:none">
+    <header>
+      <div class="header-top">
+        <h1>F&O Live Dashboard</h1>
+        <div class="adv-dec">
+          <span class="adv">▲ <span id="advCount">0</span></span>
+          <span class="dec">▼ <span id="decCount">0</span></span>
+        </div>
+      </div>
+      <div class="status-bar" id="statusBar">Connecting…</div>
+    </header>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="gainers" onclick="switchTab(this)">Gainers</div>
+      <div class="tab" data-tab="losers" onclick="switchTab(this)">Losers</div>
+      <div class="tab" data-tab="sectors" onclick="switchTab(this)">Sectors</div>
+    </div>
+
+    <!-- GAINERS -->
+    <div id="gainers" class="tab-content active">
+      <div class="table-wrap">
+        <table>
+          <thead id="gainerHead">
+            <tr>
+              <th>#</th>
+              <th>Stock</th>
+              <th>Δ Rank</th>
+              <th>LTP</th>
+              <th>% Chg</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody id="gainerBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- LOSERS -->
+    <div id="losers" class="tab-content">
+      <div class="table-wrap">
+        <table>
+          <thead id="loserHead">
+            <tr>
+              <th>#</th>
+              <th>Stock</th>
+              <th>Δ Rank</th>
+              <th>LTP</th>
+              <th>% Chg</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody id="loserBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SECTORS -->
+    <div id="sectors" class="tab-content">
+      <div class="chart-box">
+        <h3>Sectoral Performance (Avg % Change of F&O stocks)</h3>
+        <canvas id="sectorChart" height="280"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let authHeader = "";
+    let timer = null;
+    let sectorChart = null;
+    let lastData = null;
+
+    // ---------- Login ----------
+    function doLogin() {
+      const appId = document.getElementById("appId").value.trim();
+      let token = document.getElementById("accessToken").value.trim();
+      const err = document.getElementById("loginError");
+      err.textContent = "";
+
+      if (!appId || !token) {
+        err.textContent = "App ID and Access Token are required";
+        return;
+      }
+      if (!token.includes(":")) token = appId + ":" + token;
+      authHeader = token;
+
+      // Test connection
+      fetch("/api/dashboard", { headers: { Authorization: authHeader } })
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) throw new Error(data.error);
+          // Success
+          localStorage.setItem("fyers_auth", authHeader);
+          document.getElementById("loginOverlay").classList.add("hidden");
+          document.getElementById("dashboard").style.display = "block";
+          startFeed();
+        })
+        .catch(e => {
+          err.textContent = "Login failed: " + e.message;
+        });
+    }
+
+    // Auto login if token already saved
+    window.onload = () => {
+      const saved = localStorage.getItem("fyers_auth");
+      if (saved) {
+        authHeader = saved;
+        document.getElementById("loginOverlay").classList.add("hidden");
+        document.getElementById("dashboard").style.display = "block";
+        startFeed();
+      }
+    };
+
+    // ---------- Tabs ----------
+    function switchTab(el) {
+      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+      el.classList.add("active");
+      document.getElementById(el.dataset.tab).classList.add("active");
+      if (el.dataset.tab === "sectors" && lastData) renderSectorChart(lastData.sectors);
+    }
+
+    // ---------- Feed ----------
+    function startFeed() {
+      poll();
+      timer = setInterval(poll, 8000); // every 8 seconds (stable)
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch("/api/dashboard", {
+          headers: { Authorization: authHeader }
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        lastData = data;
+        render(data);
+        document.getElementById("statusBar").textContent =
+          "Live • Updated " + new Date().toLocaleTimeString();
+      } catch (e) {
+        document.getElementById("statusBar").textContent = "Error: " + e.message;
+        console.error(e);
+      }
+    }
+
+    // ---------- Render Tables ----------
+    function render(data) {
+      document.getElementById("advCount").textContent = data.advances;
+      document.getElementById("decCount").textContent = data.declines;
+
+      // Dynamic history columns
+      const times = data.times || [];
+      updateHead("gainerHead", times, true);
+      updateHead("loserHead", times, false);
+
+      renderTable("gainerBody", data.gainers, true, times);
+      renderTable("loserBody", data.losers, false, times);
+
+      if (document.querySelector(".tab[data-tab='sectors']").classList.contains("active")) {
+        renderSectorChart(data.sectors);
+      }
+    }
+
+    function updateHead(id, times, isGainer) {
+      const tr = document.querySelector(`#${id} tr`);
+      // Keep first 6 fixed columns, append history
+      while (tr.children.length > 6) tr.removeChild(tr.lastChild);
+      times.forEach(t => {
+        const th = document.createElement("th");
+        th.textContent = t;
+        th.className = "hist";
+        tr.appendChild(th);
+      });
+    }
+
+    function renderTable(bodyId, list, isGainer, times) {
+      const tbody = document.getElementById(bodyId);
+      tbody.innerHTML = "";
+
+      list.forEach((s, idx) => {
+        const tr = document.createElement("tr");
+        const rank = isGainer ? s.rankG : s.rankL;
+        const diff = isGainer ? s.diffG : s.diffL;
+        const diffCls = diff > 0 ? "pos" : (diff < 0 ? "neg" : "");
+        const diffTxt = diff > 0 ? `↑${diff}` : (diff < 0 ? `↓${Math.abs(diff)}` : "–");
+        const chpCls = s.chp >= 0 ? "pos" : "neg";
+        const sign = s.chp >= 0 ? "+" : "";
+
+        let histCells = "";
+        const hist = s.hist || [];
+        times.forEach((_, i) => {
+          const h = hist[i];
+          const r = h ? (isGainer ? h.g : h.l) : "–";
+          histCells += `<td class="hist">${r}</td>`;
+        });
+
+        tr.innerHTML = `
+          <td class="rank">${rank}</td>
+          <td class="name">${s.name}</td>
+          <td class="diff ${diffCls}">${diffTxt}</td>
+          <td class="ltp">${s.ltp}</td>
+          <td class="chp ${chpCls}">${sign}${s.chp}%</td>
+          <td class="chp ${chpCls}">${sign}${s.ch}</td>
+          ${histCells}
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // ---------- Sector Chart ----------
+    function renderSectorChart(sectors) {
+      const ctx = document.getElementById("sectorChart").getContext("2d");
+      const labels = sectors.map(s => s.name);
+      const values = sectors.map(s => s.avg);
+      const colors = values.map(v => v >= 0 ? "rgba(34,197,94,0.7)" : "rgba(239,68,68,0.7)");
+
+      if (sectorChart) {
+        sectorChart.data.labels = labels;
+        sectorChart.data.datasets[0].data = values;
+        sectorChart.data.datasets[0].backgroundColor = colors;
+        sectorChart.update();
+        return;
+      }
+
+      sectorChart = new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [{
+            label: "Avg % Change",
+            data: values,
+            backgroundColor: colors,
+            borderRadius: 4
+          }]
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => ctx.raw + "%"
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: "#334155" },
+              ticks: { color: "#94a3b8", callback: v => v + "%" }
+            },
+            y: {
+              grid: { display: false },
+              ticks: { color: "#e2e8f0", font: { size: 11 } }
+            }
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>
