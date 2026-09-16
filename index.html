@@ -2,108 +2,226 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <title>F&O Live Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {
-      --bg: #0b1120; --card: #1e293b; --text: #e2e8f0; --muted: #94a3b8;
-      --green: #22c55e; --red: #ef4444; --blue: #3b82f6; --border: #334155;
-      --header: #0f172a;
+      --bg: #0a0e17;
+      --card: #121826;
+      --surface: #1a2234;
+      --border: #2a3448;
+      --text: #e8eef8;
+      --muted: #8b9bb4;
+      --green: #22c55e;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --yellow: #eab308;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      background: var(--bg); color: var(--text);
-      min-height: 100vh; padding-bottom: 40px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding-bottom: 30px;
     }
-    /* Login Overlay */
+
+    /* ===== LOGIN ===== */
     #loginOverlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.92);
-      display: flex; align-items: center; justify-content: center; z-index: 9999;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.94);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
     }
     #loginOverlay.hidden { display: none; }
     .login-box {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 16px; padding: 28px 24px; width: 92%; max-width: 400px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 22px;
+      width: 92%; max-width: 380px;
     }
-    .login-box h2 { margin-bottom: 6px; font-size: 1.3rem; }
-    .login-box p { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
-    .login-box label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px; }
+    .login-box h2 { font-size: 1.25rem; margin-bottom: 4px; }
+    .login-box p { color: var(--muted); font-size: 0.85rem; margin-bottom: 18px; }
+    .login-box label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
     .login-box input {
       width: 100%; padding: 11px 12px; border-radius: 8px;
-      border: 1px solid var(--border); background: #0f172a;
+      border: 1px solid var(--border); background: #0d1320;
       color: var(--text); font-size: 0.95rem; margin-bottom: 14px;
     }
     .login-box button {
       width: 100%; padding: 12px; border: none; border-radius: 8px;
-      background: var(--blue); color: white; font-weight: 600; font-size: 1rem; cursor: pointer;
+      background: var(--blue); color: #fff; font-weight: 600; font-size: 1rem; cursor: pointer;
     }
     .login-error { color: var(--red); font-size: 0.85rem; margin-top: 10px; text-align: center; }
 
-    /* Header */
-    header {
-      background: var(--header); padding: 14px 16px;
-      border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
+    /* ===== TOP BAR ===== */
+    .topbar {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 14px;
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     }
-    .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-    .header-top h1 { font-size: 1.15rem; }
-    .adv-dec { display: flex; gap: 14px; font-size: 0.9rem; }
-    .adv { color: var(--green); font-weight: 600; }
-    .dec { color: var(--red); font-weight: 600; }
-    .status-bar { font-size: 0.75rem; color: var(--muted); margin-top: 6px; }
+    .idx-pill {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+      display: flex; gap: 8px; align-items: center;
+    }
+    .idx-pill .name { color: var(--muted); font-weight: 500; }
+    .idx-pill .val { font-weight: 600; }
+    .idx-pill .chg.pos { color: var(--green); }
+    .idx-pill .chg.neg { color: var(--red); }
+    .breadth {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+    }
+    .breadth .adv { color: var(--green); font-weight: 600; }
+    .breadth .dec { color: var(--red); font-weight: 600; }
+    .session-info {
+      font-size: 0.72rem; color: var(--muted); margin-left: auto;
+    }
 
-    /* Tabs */
+    /* ===== TABS ===== */
     .tabs {
-      display: flex; background: var(--card); border-bottom: 1px solid var(--border);
-      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      display: flex;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 0 8px;
+      overflow-x: auto;
     }
     .tab {
-      flex: 1; min-width: 100px; text-align: center; padding: 12px 8px;
-      font-size: 0.9rem; font-weight: 500; color: var(--muted); cursor: pointer;
-      border-bottom: 3px solid transparent; white-space: nowrap;
+      flex: 1; min-width: 90px;
+      text-align: center;
+      padding: 12px 10px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      white-space: nowrap;
     }
-    .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--blue);
+      background: rgba(59,130,246,0.08);
+      border-radius: 10px 10px 0 0;
+    }
 
-    /* Content */
-    .tab-content { display: none; padding: 12px; }
+    /* ===== CONTENT ===== */
+    .tab-content { display: none; padding: 10px; }
     .tab-content.active { display: block; }
 
-    /* Table */
-    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; border: 1px solid var(--border); }
-    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; min-width: 700px; }
-    th, td { padding: 9px 8px; text-align: left; white-space: nowrap; }
+    /* ===== TABLE ===== */
+    .table-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      min-width: 900px;
+    }
+    th, td {
+      padding: 8px 7px;
+      text-align: center;
+      white-space: nowrap;
+      border-bottom: 1px solid #1e293b;
+    }
     th {
-      background: #1e293b; color: var(--muted); font-weight: 500;
-      position: sticky; top: 0; border-bottom: 1px solid var(--border);
+      background: #151c2c;
+      color: var(--muted);
+      font-weight: 500;
+      position: sticky; top: 0;
+      font-size: 0.72rem;
+      z-index: 2;
     }
-    td { border-bottom: 1px solid #1e293b; }
+    td { color: var(--text); }
     tr:last-child td { border-bottom: none; }
-    .rank { font-weight: 700; color: var(--muted); width: 36px; }
-    .name { font-weight: 600; }
-    .ltp { font-variant-numeric: tabular-nums; }
-    .chp.pos { color: var(--green); }
-    .chp.neg { color: var(--red); }
-    .diff.pos { color: var(--green); }
-    .diff.neg { color: var(--red); }
-    .hist { color: var(--muted); font-size: 0.75rem; }
-
-    /* Sector Chart */
-    .chart-box {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 12px; padding: 16px; margin-top: 8px;
+    .col-rank { width: 32px; font-weight: 700; color: var(--muted); }
+    .col-stock {
+      text-align: left !important;
+      min-width: 110px;
+      font-weight: 600;
     }
-    .chart-box h3 { font-size: 0.95rem; margin-bottom: 12px; color: var(--muted); }
+    .col-stock small {
+      display: block;
+      font-weight: 400;
+      color: var(--muted);
+      font-size: 0.7rem;
+    }
+    .col-delta { min-width: 42px; }
+    .col-pct { min-width: 55px; font-weight: 600; }
+    .pos { color: var(--green) !important; }
+    .neg { color: var(--red) !important; }
+    .hist-cell {
+      font-size: 0.75rem;
+      color: var(--muted);
+      min-width: 36px;
+    }
+    .hist-cell.hot {
+      color: var(--yellow);
+      font-weight: 700;
+    }
+    .hist-cell.top3 {
+      color: var(--green);
+      font-weight: 700;
+    }
 
-    @media (max-width: 480px) {
-      table { font-size: 0.78rem; }
-      th, td { padding: 7px 5px; }
+    /* ===== SECTOR ===== */
+    .chart-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .chart-box h3 {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    #sectorList {
+      margin-top: 14px;
+      max-height: 320px;
+      overflow-y: auto;
+      display: none;
+    }
+    #sectorList.visible { display: block; }
+    #sectorList h4 {
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+      color: var(--text);
+    }
+    .sec-stock {
+      display: flex;
+      justify-content: space-between;
+      padding: 7px 10px;
+      border-bottom: 1px solid #1e293b;
+      font-size: 0.82rem;
+    }
+    .sec-stock:last-child { border-bottom: none; }
+
+    .status {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 8px;
     }
   </style>
 </head>
 <body>
 
-  <!-- LOGIN OVERLAY -->
+  <!-- LOGIN -->
   <div id="loginOverlay">
     <div class="login-box">
       <h2>F&O Live Dashboard</h2>
@@ -117,56 +235,63 @@
     </div>
   </div>
 
-  <!-- MAIN DASHBOARD -->
+  <!-- MAIN -->
   <div id="dashboard" style="display:none">
-    <header>
-      <div class="header-top">
-        <h1>F&O Live Dashboard</h1>
-        <div class="adv-dec">
-          <span class="adv">▲ <span id="advCount">0</span></span>
-          <span class="dec">▼ <span id="decCount">0</span></span>
-        </div>
-      </div>
-      <div class="status-bar" id="statusBar">Connecting…</div>
-    </header>
 
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="idx-pill">
+        <span class="name">NIFTY</span>
+        <span class="val" id="niftyVal">—</span>
+        <span class="chg" id="niftyChg">—</span>
+      </div>
+      <div class="idx-pill">
+        <span class="name">BANKNIFTY</span>
+        <span class="val" id="bnVal">—</span>
+        <span class="chg" id="bnChg">—</span>
+      </div>
+      <div class="breadth">
+        <span class="adv" id="advCount">0</span> adv ·
+        <span class="dec" id="decCount">0</span> dec
+      </div>
+      <div class="session-info" id="sessionInfo">—</div>
+    </div>
+
+    <!-- TABS -->
     <div class="tabs">
-      <div class="tab active" data-tab="gainers" onclick="switchTab(this)">Gainers</div>
-      <div class="tab" data-tab="losers" onclick="switchTab(this)">Losers</div>
-      <div class="tab" data-tab="sectors" onclick="switchTab(this)">Sectors</div>
+      <div class="tab active" data-tab="gainers" onclick="switchTab(this)">↗ Gainers</div>
+      <div class="tab" data-tab="losers" onclick="switchTab(this)">↘ Losers</div>
+      <div class="tab" data-tab="sectors" onclick="switchTab(this)">▣ Sectors</div>
     </div>
 
     <!-- GAINERS -->
     <div id="gainers" class="tab-content active">
       <div class="table-wrap">
         <table>
-          <thead id="gainerHead">
-            <tr>
-              <th>#</th>
-              <th>Stock</th>
-              <th>Δ Rank</th>
-              <th>LTP</th>
-              <th>% Chg</th>
-              <th>Change</th>
+          <thead>
+            <tr id="gainerHead">
+              <th class="col-rank">#</th>
+              <th class="col-stock">STOCK</th>
+              <th class="col-delta">Δ</th>
+              <th class="col-pct">%</th>
             </tr>
           </thead>
           <tbody id="gainerBody"></tbody>
         </table>
       </div>
+      <div class="status" id="statusBar">Connecting…</div>
     </div>
 
     <!-- LOSERS -->
     <div id="losers" class="tab-content">
       <div class="table-wrap">
         <table>
-          <thead id="loserHead">
-            <tr>
-              <th>#</th>
-              <th>Stock</th>
-              <th>Δ Rank</th>
-              <th>LTP</th>
-              <th>% Chg</th>
-              <th>Change</th>
+          <thead>
+            <tr id="loserHead">
+              <th class="col-rank">#</th>
+              <th class="col-stock">STOCK</th>
+              <th class="col-delta">Δ</th>
+              <th class="col-pct">%</th>
             </tr>
           </thead>
           <tbody id="loserBody"></tbody>
@@ -177,8 +302,9 @@
     <!-- SECTORS -->
     <div id="sectors" class="tab-content">
       <div class="chart-box">
-        <h3>Sectoral Performance (Avg % Change of F&O stocks)</h3>
-        <canvas id="sectorChart" height="280"></canvas>
+        <h3>Sectoral Performance (Avg % of F&O stocks) — click a bar</h3>
+        <canvas id="sectorChart" height="260"></canvas>
+        <div id="sectorList"></div>
       </div>
     </div>
   </div>
@@ -203,12 +329,10 @@
       if (!token.includes(":")) token = appId + ":" + token;
       authHeader = token;
 
-      // Test connection
       fetch("/api/dashboard", { headers: { Authorization: authHeader } })
         .then(r => r.json())
         .then(data => {
           if (data.error) throw new Error(data.error);
-          // Success
           localStorage.setItem("fyers_auth", authHeader);
           document.getElementById("loginOverlay").classList.add("hidden");
           document.getElementById("dashboard").style.display = "block";
@@ -219,7 +343,6 @@
         });
     }
 
-    // Auto login if token already saved
     window.onload = () => {
       const saved = localStorage.getItem("fyers_auth");
       if (saved) {
@@ -236,13 +359,15 @@
       document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
       el.classList.add("active");
       document.getElementById(el.dataset.tab).classList.add("active");
-      if (el.dataset.tab === "sectors" && lastData) renderSectorChart(lastData.sectors);
+      if (el.dataset.tab === "sectors" && lastData) {
+        renderSectorChart(lastData.sectors);
+      }
     }
 
     // ---------- Feed ----------
     function startFeed() {
       poll();
-      timer = setInterval(poll, 8000); // every 8 seconds (stable)
+      timer = setInterval(poll, 10000); // 10s for stability
     }
 
     async function poll() {
@@ -255,23 +380,33 @@
         lastData = data;
         render(data);
         document.getElementById("statusBar").textContent =
-          "Live • Updated " + new Date().toLocaleTimeString();
+          "Live • Updated " + new Date().toLocaleTimeString("en-IN");
       } catch (e) {
         document.getElementById("statusBar").textContent = "Error: " + e.message;
-        console.error(e);
       }
     }
 
-    // ---------- Render Tables ----------
+    // ---------- Render ----------
     function render(data) {
+      // Top bar
+      document.getElementById("niftyVal").textContent = data.nifty.lp || "—";
+      const nc = document.getElementById("niftyChg");
+      nc.textContent = (data.nifty.chp >= 0 ? "+" : "") + (data.nifty.chp || 0) + "%";
+      nc.className = "chg " + (data.nifty.chp >= 0 ? "pos" : "neg");
+
+      document.getElementById("bnVal").textContent = data.banknifty.lp || "—";
+      const bc = document.getElementById("bnChg");
+      bc.textContent = (data.banknifty.chp >= 0 ? "+" : "") + (data.banknifty.chp || 0) + "%";
+      bc.className = "chg " + (data.banknifty.chp >= 0 ? "pos" : "neg");
+
       document.getElementById("advCount").textContent = data.advances;
       document.getElementById("decCount").textContent = data.declines;
+      document.getElementById("sessionInfo").textContent =
+        `${data.total || 0} names • F&O Breadth`;
 
-      // Dynamic history columns
       const times = data.times || [];
-      updateHead("gainerHead", times, true);
-      updateHead("loserHead", times, false);
-
+      updateHead("gainerHead", times);
+      updateHead("loserHead", times);
       renderTable("gainerBody", data.gainers, true, times);
       renderTable("loserBody", data.losers, false, times);
 
@@ -280,14 +415,14 @@
       }
     }
 
-    function updateHead(id, times, isGainer) {
-      const tr = document.querySelector(`#${id} tr`);
-      // Keep first 6 fixed columns, append history
-      while (tr.children.length > 6) tr.removeChild(tr.lastChild);
+    function updateHead(id, times) {
+      const tr = document.getElementById(id);
+      // Keep first 4 fixed columns
+      while (tr.children.length > 4) tr.removeChild(tr.lastChild);
       times.forEach(t => {
         const th = document.createElement("th");
         th.textContent = t;
-        th.className = "hist";
+        th.style.fontSize = "0.68rem";
         tr.appendChild(th);
       });
     }
@@ -296,42 +431,44 @@
       const tbody = document.getElementById(bodyId);
       tbody.innerHTML = "";
 
-      list.forEach((s, idx) => {
+      list.forEach(s => {
         const tr = document.createElement("tr");
         const rank = isGainer ? s.rankG : s.rankL;
         const diff = isGainer ? s.diffG : s.diffL;
-        const diffCls = diff > 0 ? "pos" : (diff < 0 ? "neg" : "");
         const diffTxt = diff > 0 ? `↑${diff}` : (diff < 0 ? `↓${Math.abs(diff)}` : "–");
+        const diffCls = diff > 0 ? "pos" : (diff < 0 ? "neg" : "");
         const chpCls = s.chp >= 0 ? "pos" : "neg";
         const sign = s.chp >= 0 ? "+" : "";
 
-        let histCells = "";
+        let histHtml = "";
         const hist = s.hist || [];
-        times.forEach((_, i) => {
-          const h = hist[i];
+        times.forEach((t, i) => {
+          // find matching time
+          const h = hist.find(x => x.t === t);
           const r = h ? (isGainer ? h.g : h.l) : "–";
-          histCells += `<td class="hist">${r}</td>`;
+          let cls = "hist-cell";
+          if (r === 1) cls += " top3";
+          else if (typeof r === "number" && r <= 5) cls += " hot";
+          histHtml += `<td class="${cls}">${r}</td>`;
         });
 
         tr.innerHTML = `
-          <td class="rank">${rank}</td>
-          <td class="name">${s.name}</td>
-          <td class="diff ${diffCls}">${diffTxt}</td>
-          <td class="ltp">${s.ltp}</td>
-          <td class="chp ${chpCls}">${sign}${s.chp}%</td>
-          <td class="chp ${chpCls}">${sign}${s.ch}</td>
-          ${histCells}
+          <td class="col-rank">${rank}</td>
+          <td class="col-stock">${s.name}<small>${s.sector}</small></td>
+          <td class="col-delta ${diffCls}">${diffTxt}</td>
+          <td class="col-pct ${chpCls}">${sign}${s.chp}%</td>
+          ${histHtml}
         `;
         tbody.appendChild(tr);
       });
     }
 
-    // ---------- Sector Chart ----------
+    // ---------- Sector Chart + Click ----------
     function renderSectorChart(sectors) {
       const ctx = document.getElementById("sectorChart").getContext("2d");
       const labels = sectors.map(s => s.name);
       const values = sectors.map(s => s.avg);
-      const colors = values.map(v => v >= 0 ? "rgba(34,197,94,0.7)" : "rgba(239,68,68,0.7)");
+      const colors = values.map(v => v >= 0 ? "rgba(34,197,94,0.75)" : "rgba(239,68,68,0.75)");
 
       if (sectorChart) {
         sectorChart.data.labels = labels;
@@ -346,7 +483,7 @@
         data: {
           labels,
           datasets: [{
-            label: "Avg % Change",
+            label: "Avg %",
             data: values,
             backgroundColor: colors,
             borderRadius: 4
@@ -355,26 +492,44 @@
         options: {
           indexAxis: "y",
           responsive: true,
+          onClick: (evt, elements) => {
+            if (!elements.length) return;
+            const idx = elements[0].index;
+            showSectorStocks(sectors[idx]);
+          },
           plugins: {
             legend: { display: false },
             tooltip: {
-              callbacks: {
-                label: ctx => ctx.raw + "%"
-              }
+              callbacks: { label: c => c.raw + "%" }
             }
           },
           scales: {
             x: {
-              grid: { color: "#334155" },
-              ticks: { color: "#94a3b8", callback: v => v + "%" }
+              grid: { color: "#2a3448" },
+              ticks: { color: "#8b9bb4", callback: v => v + "%" }
             },
             y: {
               grid: { display: false },
-              ticks: { color: "#e2e8f0", font: { size: 11 } }
+              ticks: { color: "#e8eef8", font: { size: 11 } }
             }
           }
         }
       });
+    }
+
+    function showSectorStocks(sec) {
+      const box = document.getElementById("sectorList");
+      box.classList.add("visible");
+      let html = `<h4>${sec.name} — stocks sorted by % change</h4>`;
+      (sec.stocks || []).forEach(s => {
+        const cls = s.chp >= 0 ? "pos" : "neg";
+        const sign = s.chp >= 0 ? "+" : "";
+        html += `<div class="sec-stock">
+          <span>${s.name}</span>
+          <span class="${cls}">${sign}${s.chp}% &nbsp; ${s.ltp}</span>
+        </div>`;
+      });
+      box.innerHTML = html;
     }
   </script>
 </body>
