@@ -3,7 +3,6 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 
-// Full F&O list provided by user
 const RAW_SYMBOLS = [
   "PATANJALI","POLICYBZR","MFSL","PAYTM","HDFCLIFE","ICICIPRULI","SBILIFE","RADICO",
   "SBIN","MARICO","ITC","OBEROIRLTY","UNOMINDA","COLPAL","LODHA","IOC","UNIONBANK",
@@ -92,13 +91,10 @@ const SNAPSHOT_MS = 5 * 60 * 1000;
 function fetchQuotes(auth, symbols) {
   return new Promise((resolve, reject) => {
     const batches = [];
-    for (let i = 0; i < symbols.length; i += 50) {
-      batches.push(symbols.slice(i, i + 50));
-    }
+    for (let i = 0; i < symbols.length; i += 50) batches.push(symbols.slice(i, i + 50));
     const results = [];
     let done = 0;
     if (batches.length === 0) return resolve([]);
-
     batches.forEach(batch => {
       const opts = {
         hostname: "api-t1.fyers.in",
@@ -131,14 +127,13 @@ function processData(quotes, indexQuotes) {
     const v = q.v || {};
     const name = (q.n || "").replace("NSE:", "").replace("-EQ", "");
     const ltp = Number(v.lp) || 0;
-    const chp = Number(v.chp) || 0;
     if (ltp <= 0) return;
     stocks.push({
       symbol: q.n,
       name,
       ltp: +ltp.toFixed(2),
       ch: +(Number(v.ch) || 0).toFixed(2),
-      chp: +chp.toFixed(2),
+      chp: +(Number(v.chp) || 0).toFixed(2),
       sector: SECTOR_MAP[name] || "Others"
     });
   });
@@ -148,15 +143,18 @@ function processData(quotes, indexQuotes) {
   byGain.forEach((s, i) => (s.rankG = i + 1));
   byLoss.forEach((s, i) => (s.rankL = i + 1));
 
+  // Take snapshot every 5 minutes
   if (now - lastSnapshot >= SNAPSHOT_MS || lastSnapshot === 0) {
     lastSnapshot = now;
-    const t = new Date().toLocaleTimeString("en-IN", {
-      hour: "2-digit", minute: "2-digit", hour12: false
-    });
+    const t = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
     stocks.forEach(s => {
       if (!rankHistory[s.name]) rankHistory[s.name] = [];
-      rankHistory[s.name].push({ t, g: s.rankG, l: s.rankL });
-      if (rankHistory[s.name].length > 48) rankHistory[s.name].shift();
+      // avoid duplicate same-minute entries
+      const last = rankHistory[s.name][rankHistory[s.name].length - 1];
+      if (!last || last.t !== t) {
+        rankHistory[s.name].push({ t, g: s.rankG, l: s.rankL });
+      }
+      if (rankHistory[s.name].length > 60) rankHistory[s.name].shift();
     });
   }
 
@@ -189,24 +187,14 @@ function processData(quotes, indexQuotes) {
   let banknifty = { lp: 0, chp: 0 };
   (indexQuotes || []).forEach(q => {
     const v = q.v || {};
-    if ((q.n || "").includes("NIFTY50")) {
-      nifty = { lp: +(Number(v.lp) || 0).toFixed(1), chp: +(Number(v.chp) || 0).toFixed(2) };
-    }
-    if ((q.n || "").includes("NIFTYBANK")) {
-      banknifty = { lp: +(Number(v.lp) || 0).toFixed(1), chp: +(Number(v.chp) || 0).toFixed(2) };
-    }
+    if ((q.n || "").includes("NIFTY50")) nifty = { lp: +(Number(v.lp) || 0).toFixed(1), chp: +(Number(v.chp) || 0).toFixed(2) };
+    if ((q.n || "").includes("NIFTYBANK")) banknifty = { lp: +(Number(v.lp) || 0).toFixed(1), chp: +(Number(v.chp) || 0).toFixed(2) };
   });
 
-  const allTimes = [];
-  const seen = new Set();
-  Object.values(rankHistory).forEach(arr => {
-    arr.forEach(x => {
-      if (!seen.has(x.t)) {
-        seen.add(x.t);
-        allTimes.push(x.t);
-      }
-    });
-  });
+  // Collect unique times in chronological order
+  const timeSet = new Set();
+  Object.values(rankHistory).forEach(arr => arr.forEach(x => timeSet.add(x.t)));
+  const allTimes = Array.from(timeSet).sort();
 
   return {
     nifty, banknifty,
@@ -222,11 +210,7 @@ function processData(quotes, indexQuotes) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    return res.end();
-  }
+  if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
 
   if (req.url === "/" || req.url === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -253,12 +237,8 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
-
-  res.writeHead(404);
-  res.end("Not found");
+  res.writeHead(404); res.end("Not found");
 });
 
 const port = process.env.PORT || 3000;
-server.listen(port, () => {
-  console.log(`Dashboard running on port ${port}`);
-});
+server.listen(port, () => console.log(`Dashboard running on port ${port}`));
