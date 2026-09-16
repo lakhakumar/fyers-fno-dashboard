@@ -3,83 +3,89 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 
-const FNO_SYMBOLS = [
-  "NSE:360ONE-EQ","NSE:ABB-EQ","NSE:ABCAPITAL-EQ","NSE:ADANIENSOL-EQ","NSE:ADANIENT-EQ",
-  "NSE:ADANIGREEN-EQ","NSE:ADANIPORTS-EQ","NSE:ADANIPOWER-EQ","NSE:ALKEM-EQ","NSE:AMBER-EQ",
-  "NSE:AMBUJACEM-EQ","NSE:ANGELONE-EQ","NSE:APLAPOLLO-EQ","NSE:APOLLOHOSP-EQ","NSE:ASHOKLEY-EQ",
-  "NSE:ASIANPAINT-EQ","NSE:ASTRAL-EQ","NSE:ATHERENERG-EQ","NSE:AUROPHARMA-EQ","NSE:DMART-EQ",
-  "NSE:AXISBANK-EQ","NSE:BSE-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
-  "NSE:BAJAJHLDNG-EQ","NSE:BANDHANBNK-EQ","NSE:BANKBARODA-EQ","NSE:BANKINDIA-EQ","NSE:BDL-EQ",
-  "NSE:BEL-EQ","NSE:BHARATFORG-EQ","NSE:BHEL-EQ","NSE:BPCL-EQ","NSE:BHARTIARTL-EQ",
-  "NSE:BIOCON-EQ","NSE:BLUESTARCO-EQ","NSE:BOSCHLTD-EQ","NSE:BRITANNIA-EQ","NSE:CGPOWER-EQ",
-  "NSE:CANBK-EQ","NSE:CDSL-EQ","NSE:CHOLAFIN-EQ","NSE:CIPLA-EQ","NSE:COALINDIA-EQ",
-  "NSE:COCHINSHIP-EQ","NSE:COFORGE-EQ","NSE:COLPAL-EQ","NSE:CAMS-EQ","NSE:CONCOR-EQ",
-  "NSE:CUMMINSIND-EQ","NSE:CYIENT-EQ","NSE:DABUR-EQ","NSE:DALBHARAT-EQ","NSE:DELHIVERY-EQ",
-  "NSE:DIVISLAB-EQ","NSE:DIXON-EQ","NSE:DLF-EQ","NSE:DRREDDY-EQ","NSE:EICHERMOT-EQ",
-  "NSE:ESCORTS-EQ","NSE:EXIDEIND-EQ","NSE:FEDERALBNK-EQ","NSE:GAIL-EQ","NSE:GLENMARK-EQ",
-  "NSE:GMRINFRA-EQ","NSE:GODREJCP-EQ","NSE:GODREJPROP-EQ","NSE:GRASIM-EQ","NSE:HAVELLS-EQ",
-  "NSE:HCLTECH-EQ","NSE:HDFCBANK-EQ","NSE:HDFCLIFE-EQ","NSE:HEROMOTOCO-EQ","NSE:HINDALCO-EQ",
-  "NSE:HAL-EQ","NSE:HINDUNILVR-EQ","NSE:HINDZINC-EQ","NSE:HUDCO-EQ","NSE:ICICIBANK-EQ",
-  "NSE:ICICIGI-EQ","NSE:ICICIPRULI-EQ","NSE:IDEA-EQ","NSE:IDFCFIRSTB-EQ","NSE:IEX-EQ",
-  "NSE:IGL-EQ","NSE:INDHOTEL-EQ","NSE:INDIANB-EQ","NSE:INDIGO-EQ","NSE:INDUSINDBK-EQ",
-  "NSE:INDUSTOWER-EQ","NSE:INFY-EQ","NSE:IOC-EQ","NSE:IPCALAB-EQ","NSE:IRCTC-EQ",
-  "NSE:IRFC-EQ","NSE:ITC-EQ","NSE:JINDALSTEL-EQ","NSE:JIOFIN-EQ","NSE:JSWENERGY-EQ",
-  "NSE:JSWSTEEL-EQ","NSE:JUBLFOOD-EQ","NSE:KOTAKBANK-EQ","NSE:LALPATHLAB-EQ","NSE:LAURUSLABS-EQ",
-  "NSE:LICI-EQ","NSE:LT-EQ","NSE:LTF-EQ","NSE:LTIM-EQ","NSE:LTTS-EQ",
-  "NSE:LUPIN-EQ","NSE:M&M-EQ","NSE:M&MFIN-EQ","NSE:MANAPPURAM-EQ","NSE:MARICO-EQ",
-  "NSE:MARUTI-EQ","NSE:MCX-EQ","NSE:METROPOLIS-EQ","NSE:MFSL-EQ","NSE:MGL-EQ",
-  "NSE:MOTHERSON-EQ","NSE:MPHASIS-EQ","NSE:MRF-EQ","NSE:MUTHOOTFIN-EQ","NSE:NATIONALUM-EQ",
-  "NSE:NAUKRI-EQ","NSE:NAVINFLUOR-EQ","NSE:NESTLEIND-EQ","NSE:NMDC-EQ","NSE:NTPC-EQ",
-  "NSE:NYKAA-EQ","NSE:OBEROIRLTY-EQ","NSE:OFSS-EQ","NSE:ONGC-EQ","NSE:PAGEIND-EQ",
-  "NSE:PATANJALI-EQ","NSE:PAYTM-EQ","NSE:PERSISTENT-EQ","NSE:PETRONET-EQ","NSE:PFC-EQ",
-  "NSE:PIDILITIND-EQ","NSE:PIIND-EQ","NSE:PNB-EQ","NSE:POLYCAB-EQ","NSE:POWERGRID-EQ",
-  "NSE:PPLPHARMA-EQ","NSE:PRESTIGE-EQ","NSE:RBLBANK-EQ","NSE:RECLTD-EQ","NSE:RELIANCE-EQ",
-  "NSE:SAIL-EQ","NSE:SBICARD-EQ","NSE:SBILIFE-EQ","NSE:SBIN-EQ","NSE:SHREECEM-EQ",
-  "NSE:SIEMENS-EQ","NSE:SOLARINDS-EQ","NSE:SONACOMS-EQ","NSE:SRF-EQ","NSE:SUNPHARMA-EQ",
-  "NSE:SUNTV-EQ","NSE:SUPREMEIND-EQ","NSE:SYNGENE-EQ","NSE:TATACHEM-EQ","NSE:TATACOMM-EQ",
-  "NSE:TATACONSUM-EQ","NSE:TATAELXSI-EQ","NSE:TATAMOTORS-EQ","NSE:TATAPOWER-EQ","NSE:TATASTEEL-EQ",
-  "NSE:TCS-EQ","NSE:TECHM-EQ","NSE:TITAN-EQ","NSE:TORNTPHARM-EQ","NSE:TRENT-EQ",
-  "NSE:TVSMOTOR-EQ","NSE:ULTRACEMCO-EQ","NSE:UNIONBANK-EQ","NSE:UNITDSPR-EQ","NSE:UPL-EQ",
-  "NSE:VBL-EQ","NSE:VEDL-EQ","NSE:VOLTAS-EQ","NSE:WIPRO-EQ","NSE:YESBANK-EQ",
-  "NSE:ZOMATO-EQ","NSE:ZYDUSLIFE-EQ","NSE:POLICYBZR-EQ","NSE:RADICO-EQ"
+// Full F&O list provided by user
+const RAW_SYMBOLS = [
+  "PATANJALI","POLICYBZR","MFSL","PAYTM","HDFCLIFE","ICICIPRULI","SBILIFE","RADICO",
+  "SBIN","MARICO","ITC","OBEROIRLTY","UNOMINDA","COLPAL","LODHA","IOC","UNIONBANK",
+  "PNB","MUTHOOTFIN","TIINDIA","NESTLEIND","GLENMARK","JSWSTEEL","BPCL","NATIONALUM",
+  "PIDILITIND","BAJAJ-AUTO","AXISBANK","HINDALCO","TRENT","YESBANK","BLUESTARCO",
+  "TATACONSUM","UNITDSPR","HINDPETRO","CUMMINSIND","RECLTD","HEROMOTOCO","M&M",
+  "KOTAKBANK","HINDUNILVR","ADANIGREEN","MCX","HINDZINC","PHOENIXLTD","PGEL","DMART",
+  "TITAN","JUBLFOOD","BRITANNIA","CONCOR","BOSCHLTD","LICI","SRF","SUNPHARMA",
+  "GODFRYPHLP","BANKBARODA","NBCC","VMM","ICICIGI","MAHABANK","FORCEMOT","ZYDUSLIFE",
+  "BEL","JINDALSTEL","COALINDIA","HYUNDAI","GODREJCP","HDFCBANK","CANBK","ABCAPITAL",
+  "EICHERMOT","ICICIBANK","ADANIPORTS","PFC","ASIANPAINT","ETERNAL","CIPLA","AUBANK",
+  "GRASIM","PRESTIGE","GVT&D","KFINTECH","BHARATFORG","OIL","INDIANB","RELIANCE",
+  "GODREJPROP","ONGC","MANAPPURAM","SAIL","DLF","DELHIVERY","ALKEM","HAVELLS",
+  "BHARTIARTL","IDFCFIRSTB","ASTRAL","VBL","INOXWIND","LICHSGFIN","ADANIPOWER",
+  "BANKINDIA","KEI","ADANIENSOL","RBLBANK","BDL","MOTHERSON","PIIND","ULTRACEMCO",
+  "APLAPOLLO","BANDHANBNK","DIXON","HAL","SUPREMEIND","POWERGRID","IEX","ATHERENERG",
+  "HCLTECH","JSWENERGY","SHRIRAMFIN","SBICARD","ASHOKLEY","GAIL","MAZDOCK","AMBUJACEM",
+  "APOLLOHOSP","KAYNES","INDHOTEL","NMDC","IRFC","POLYCAB","ADANIENT","BAJFINANCE",
+  "JIOFIN","FEDERALBNK","TATASTEEL","ABB","VEDL","TVSMOTOR","DIVISLAB","NAUKRI",
+  "DRREDDY","LTF","COCHINSHIP","MAXHEALTH","SHREECEM","COFORGE","MARUTI","VOLTAS",
+  "BHEL","IREDA","GMRAIRPORT","360ONE","PETRONET","PERSISTENT","TATAPOWER","SIEMENS",
+  "CGPOWER","DABUR","RVNL","NTPC","TORNTPHARM","NHPC","TMPV","PAGEIND","LUPIN",
+  "INDIGO","INDUSTOWER","CDSL","PNBHOUSING","AMBER","BAJAJFINSV","AUROPHARMA",
+  "INDUSINDBK","LAURUSLABS","FORTIS","LT","TECHM","CROMPTON","SAGILITY","IDEA",
+  "ANGELONE","KPITTECH","MOTILALOFS","CHOLAFIN","HDFCAMC","MANKIND","BAJAJHLDNG",
+  "INFY","CAMS","SWIGGY","SUZLON","SOLARINDS","UPL","WIPRO","POWERINDIA","TATAELXSI",
+  "BIOCON","BSE","WAAREEENER","OFSS","NAM-INDIA","MPHASIS","LTM","TCS","SONACOMS",
+  "NYKAA","KALYANKJIL","PREMIERENE"
 ];
 
-const INDEX_SYMBOLS = ["NSE:NIFTY50-INDEX","NSE:NIFTYBANK-INDEX"];
+const FNO_SYMBOLS = RAW_SYMBOLS.map(s => `NSE:${s}-EQ`);
+const INDEX_SYMBOLS = ["NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"];
 
 const SECTOR_MAP = {
-  "RELIANCE":"Energy","ONGC":"Energy","BPCL":"Energy","IOC":"Energy","GAIL":"Energy","PETRONET":"Energy",
-  "ADANIGREEN":"Energy","ADANIENSOL":"Energy","JSWENERGY":"Energy","TATAPOWER":"Power","NTPC":"Power","POWERGRID":"Power",
-  "TCS":"IT","INFY":"IT","HCLTECH":"IT","WIPRO":"IT","TECHM":"IT","COFORGE":"IT","LTIM":"IT","PERSISTENT":"IT","MPHASIS":"IT","LTTS":"IT","TATAELXSI":"IT","OFSS":"IT","CYIENT":"IT",
-  "HDFCBANK":"Bank","ICICIBANK":"Bank","SBIN":"Bank","KOTAKBANK":"Bank","AXISBANK":"Bank","INDUSINDBK":"Bank",
-  "BANKBARODA":"Bank","PNB":"Bank","CANBK":"Bank","FEDERALBNK":"Bank","IDFCFIRSTB":"Bank","AUBANK":"Bank",
-  "BANDHANBNK":"Bank","BANKINDIA":"Bank","RBLBANK":"Bank","YESBANK":"Bank","UNIONBANK":"Bank","INDIANB":"Bank",
-  "BAJFINANCE":"Finance","BAJAJFINSV":"Finance","CHOLAFIN":"Finance","MUTHOOTFIN":"Finance","PFC":"Finance","RECLTD":"Finance",
-  "M&MFIN":"Finance","MANAPPURAM":"Finance","LTF":"Finance","JIOFIN":"Finance","IRFC":"Finance","SBICARD":"Finance",
+  "RELIANCE":"Energy","ONGC":"Energy","BPCL":"Energy","IOC":"Energy","GAIL":"Energy",
+  "PETRONET":"Energy","HINDPETRO":"Energy","ADANIGREEN":"Energy","ADANIENSOL":"Energy",
+  "JSWENERGY":"Energy","TATAPOWER":"Power","NTPC":"Power","POWERGRID":"Power","NHPC":"Power",
+  "IREDA":"Power","SUZLON":"Power","WAAREEENER":"Power","POWERINDIA":"Power",
+  "TCS":"IT","INFY":"IT","HCLTECH":"IT","WIPRO":"IT","TECHM":"IT","COFORGE":"IT",
+  "PERSISTENT":"IT","MPHASIS":"IT","TATAELXSI":"IT","OFSS":"IT","LTM":"IT","KPITTECH":"IT",
+  "HDFCBANK":"Bank","ICICIBANK":"Bank","SBIN":"Bank","KOTAKBANK":"Bank","AXISBANK":"Bank",
+  "INDUSINDBK":"Bank","BANKBARODA":"Bank","PNB":"Bank","CANBK":"Bank","FEDERALBNK":"Bank",
+  "IDFCFIRSTB":"Bank","AUBANK":"Bank","BANDHANBNK":"Bank","BANKINDIA":"Bank","RBLBANK":"Bank",
+  "YESBANK":"Bank","UNIONBANK":"Bank","INDIANB":"Bank","MAHABANK":"Bank",
+  "BAJFINANCE":"Finance","BAJAJFINSV":"Finance","CHOLAFIN":"Finance","MUTHOOTFIN":"Finance",
+  "PFC":"Finance","RECLTD":"Finance","MANAPPURAM":"Finance","LTF":"Finance","JIOFIN":"Finance",
+  "IRFC":"Finance","SBICARD":"Finance","SHRIRAMFIN":"Finance","LICHSGFIN":"Finance",
+  "PNBHOUSING":"Finance","ABCAPITAL":"Finance","ANGELONE":"Finance","MOTILALOFS":"Finance",
+  "HDFCAMC":"Finance","BAJAJHLDNG":"Finance","MFSL":"Finance",
   "HDFCLIFE":"Insurance","SBILIFE":"Insurance","ICICIPRULI":"Insurance","ICICIGI":"Insurance","LICI":"Insurance",
-  "MARUTI":"Auto","M&M":"Auto","TATAMOTORS":"Auto","EICHERMOT":"Auto","HEROMOTOCO":"Auto","BAJAJ-AUTO":"Auto",
+  "MARUTI":"Auto","M&M":"Auto","EICHERMOT":"Auto","HEROMOTOCO":"Auto","BAJAJ-AUTO":"Auto",
   "TVSMOTOR":"Auto","ASHOKLEY":"Auto","MOTHERSON":"Auto","BHARATFORG":"Auto","SONACOMS":"Auto",
+  "UNOMINDA":"Auto","HYUNDAI":"Auto","FORCEMOT":"Auto","TIINDIA":"Auto",
   "SUNPHARMA":"Pharma","DRREDDY":"Pharma","CIPLA":"Pharma","DIVISLAB":"Pharma","APOLLOHOSP":"Pharma",
-  "LUPIN":"Pharma","AUROPHARMA":"Pharma","BIOCON":"Pharma","ALKEM":"Pharma","TORNTPHARM":"Pharma","GLENMARK":"Pharma",
-  "LAURUSLABS":"Pharma","ZYDUSLIFE":"Pharma","IPCALAB":"Pharma","PPLPHARMA":"Pharma","SYNGENE":"Pharma",
-  "TATASTEEL":"Metal","JSWSTEEL":"Metal","HINDALCO":"Metal","SAIL":"Metal","VEDL":"Metal","NMDC":"Metal",
-  "COALINDIA":"Metal","NATIONALUM":"Metal","HINDZINC":"Metal","JINDALSTEL":"Metal",
-  "ASIANPAINT":"Consumer","HINDUNILVR":"Consumer","ITC":"Consumer","NESTLEIND":"Consumer","BRITANNIA":"Consumer",
-  "GODREJCP":"Consumer","DABUR":"Consumer","MARICO":"Consumer","COLPAL":"Consumer","TATACONSUM":"Consumer",
-  "VBL":"Consumer","UNITDSPR":"Consumer","JUBLFOOD":"Consumer","PATANJALI":"Consumer","RADICO":"Consumer",
-  "LT":"Infra","ULTRACEMCO":"Infra","GRASIM":"Infra","ADANIPORTS":"Infra","ADANIENT":"Infra","AMBUJACEM":"Infra",
-  "SHREECEM":"Infra","DALBHARAT":"Infra",
-  "DLF":"Realty","GODREJPROP":"Realty","OBEROIRLTY":"Realty","PRESTIGE":"Realty",
+  "LUPIN":"Pharma","AUROPHARMA":"Pharma","BIOCON":"Pharma","ALKEM":"Pharma","TORNTPHARM":"Pharma",
+  "GLENMARK":"Pharma","LAURUSLABS":"Pharma","ZYDUSLIFE":"Pharma","MANKIND":"Pharma","FORTIS":"Pharma","MAXHEALTH":"Pharma",
+  "TATASTEEL":"Metal","JSWSTEEL":"Metal","HINDALCO":"Metal","SAIL":"Metal","VEDL":"Metal",
+  "NMDC":"Metal","COALINDIA":"Metal","NATIONALUM":"Metal","HINDZINC":"Metal","JINDALSTEL":"Metal",
+  "ASIANPAINT":"Consumer","HINDUNILVR":"Consumer","ITC":"Consumer","NESTLEIND":"Consumer",
+  "BRITANNIA":"Consumer","GODREJCP":"Consumer","DABUR":"Consumer","MARICO":"Consumer",
+  "COLPAL":"Consumer","TATACONSUM":"Consumer","VBL":"Consumer","UNITDSPR":"Consumer",
+  "JUBLFOOD":"Consumer","PATANJALI":"Consumer","RADICO":"Consumer","GODFRYPHLP":"Consumer",
+  "LT":"Infra","ULTRACEMCO":"Infra","GRASIM":"Infra","ADANIPORTS":"Infra","ADANIENT":"Infra",
+  "AMBUJACEM":"Infra","SHREECEM":"Infra","NBCC":"Infra","RVNL":"Infra","GMRAIRPORT":"Infra",
+  "DLF":"Realty","GODREJPROP":"Realty","OBEROIRLTY":"Realty","PRESTIGE":"Realty","LODHA":"Realty","PHOENIXLTD":"Realty",
   "BHARTIARTL":"Telecom","IDEA":"Telecom","INDUSTOWER":"Telecom",
-  "BEL":"Defence","HAL":"Defence","BDL":"Defence","BHEL":"Capital Goods","SIEMENS":"Capital Goods","ABB":"Capital Goods",
-  "CGPOWER":"Capital Goods","CUMMINSIND":"Capital Goods","HAVELLS":"Consumer Durables","VOLTAS":"Consumer Durables",
-  "BLUESTARCO":"Consumer Durables","DIXON":"Consumer Durables","AMBER":"Consumer Durables",
+  "BEL":"Defence","HAL":"Defence","BDL":"Defence","MAZDOCK":"Defence","BHEL":"Capital Goods",
+  "SIEMENS":"Capital Goods","ABB":"Capital Goods","CGPOWER":"Capital Goods","CUMMINSIND":"Capital Goods",
+  "HAVELLS":"Consumer Durables","VOLTAS":"Consumer Durables","BLUESTARCO":"Consumer Durables",
+  "DIXON":"Consumer Durables","AMBER":"Consumer Durables","CROMPTON":"Consumer Durables","PGEL":"Consumer Durables",
   "IRCTC":"Services","CONCOR":"Services","INDIGO":"Services","INDHOTEL":"Services","DELHIVERY":"Services",
   "ZOMATO":"Services","NYKAA":"Services","PAYTM":"Services","NAUKRI":"Services","POLICYBZR":"Services",
-  "DMART":"Retail","TRENT":"Retail","ABCAPITAL":"Finance","ANGELONE":"Finance","CDSL":"Finance","CAMS":"Finance",
-  "MCX":"Finance","BSE":"Finance","MFSL":"Finance","TATACOMM":"Telecom"
+  "SWIGGY":"Services","DMART":"Retail","TRENT":"Retail","VMM":"Retail","KALYANKJIL":"Retail",
+  "CDSL":"Finance","CAMS":"Finance","MCX":"Finance","BSE":"Finance","IEX":"Power","KEI":"Capital Goods",
+  "POLYCAB":"Capital Goods","KAYNES":"Capital Goods","SOLARINDS":"Chemicals","UPL":"Chemicals",
+  "PIDILITIND":"Chemicals","SRF":"Chemicals","PIIND":"Chemicals","APLAPOLLO":"Metal","SUPREMEIND":"Chemicals",
+  "ASTRAL":"Chemicals","INOXWIND":"Power","OIL":"Energy","ADANIPOWER":"Power","ETERNAL":"Others",
+  "GVT&D":"Others","KFINTECH":"Finance","SAGILITY":"IT","NAM-INDIA":"Finance","PREMIERENE":"Power",
+  "TMPV":"Auto","360ONE":"Finance","COCHINSHIP":"Defence","ATHERENERG":"Auto"
 };
 
-let rankHistory = {};   // name -> [{t, g, l}]
+let rankHistory = {};
 let lastSnapshot = 0;
 const SNAPSHOT_MS = 5 * 60 * 1000;
 
@@ -137,24 +143,20 @@ function processData(quotes, indexQuotes) {
     });
   });
 
-  // Ranking
   const byGain = [...stocks].sort((a, b) => b.chp - a.chp);
   const byLoss = [...stocks].sort((a, b) => a.chp - b.chp);
   byGain.forEach((s, i) => (s.rankG = i + 1));
   byLoss.forEach((s, i) => (s.rankL = i + 1));
 
-  // 5-min snapshot
   if (now - lastSnapshot >= SNAPSHOT_MS || lastSnapshot === 0) {
     lastSnapshot = now;
     const t = new Date().toLocaleTimeString("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false
+      hour: "2-digit", minute: "2-digit", hour12: false
     });
     stocks.forEach(s => {
       if (!rankHistory[s.name]) rankHistory[s.name] = [];
       rankHistory[s.name].push({ t, g: s.rankG, l: s.rankL });
-      if (rankHistory[s.name].length > 48) rankHistory[s.name].shift(); // keep ~4 hrs
+      if (rankHistory[s.name].length > 48) rankHistory[s.name].shift();
     });
   }
 
@@ -168,7 +170,6 @@ function processData(quotes, indexQuotes) {
   const advances = stocks.filter(s => s.chp > 0).length;
   const declines = stocks.filter(s => s.chp < 0).length;
 
-  // Sector averages
   const sec = {};
   stocks.forEach(s => {
     if (!sec[s.sector]) sec[s.sector] = { sum: 0, n: 0, list: [] };
@@ -184,7 +185,6 @@ function processData(quotes, indexQuotes) {
     }))
     .sort((a, b) => b.avg - a.avg);
 
-  // Index values
   let nifty = { lp: 0, chp: 0 };
   let banknifty = { lp: 0, chp: 0 };
   (indexQuotes || []).forEach(q => {
@@ -197,7 +197,6 @@ function processData(quotes, indexQuotes) {
     }
   });
 
-  // Collect all unique times for table headers
   const allTimes = [];
   const seen = new Set();
   Object.values(rankHistory).forEach(arr => {
@@ -210,10 +209,8 @@ function processData(quotes, indexQuotes) {
   });
 
   return {
-    nifty,
-    banknifty,
-    advances,
-    declines,
+    nifty, banknifty,
+    advances, declines,
     total: stocks.length,
     gainers: byGain.slice(0, 30),
     losers: byLoss.slice(0, 30),
