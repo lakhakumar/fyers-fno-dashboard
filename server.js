@@ -829,141 +829,621 @@ function getField(v, names) {
 }
 
 function buildUniverse(fo, cm) {
-  const out = new Map();
+  /*
+   * CURRENT FYERS SYMBOL MASTER FORMAT
+   *
+   * NSE_FO_sym_master.json fields include:
+   *
+   *   fyToken
+   *   isin
+   *   exSymbol
+   *   symDetails
+   *   symTicker
+   *   exchange
+   *   segment
+   *   exSymName
+   *   exToken
+   *   exSeries
+   *   optType
+   *   underSym
+   *   underFyTok
+   *   exInstType
+   *   expiryDate
+   *
+   * exInstType:
+   *
+   *   11 = FUTIDX
+   *   12 = FUTIVX
+   *   13 = FUTSTK
+   *   14 = OPTIDX
+   *   15 = OPTSTK
+   *
+   * We only want FUTSTK because the dashboard is for
+   * equity F&O stocks.
+   */
 
-  for (const [key, v] of Object.entries(fo)) {
-    const typ =
-      String(
-        getField(
-          v,
-          [
-            'instrumentType',
-            'instrument_type',
-            'type'
-          ]
-        )
-      ).toUpperCase();
+  const foUnderlyings = new Map();
+
+  /*
+   * -------------------------------------------------------
+   * STEP 1
+   * Read NSE F&O master and collect unique stock
+   * underlyings from FUTSTK contracts.
+   * -------------------------------------------------------
+   */
+
+  for (const [masterKey, raw] of Object.entries(fo || {})) {
+    const v = raw || {};
+
+    const instrumentType = String(
+      getField(v, [
+        'exInstType',
+        'instrumentType',
+        'instrument_type',
+        'type'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    /*
+     * Current FYERS format:
+     *
+     * exInstType = 13
+     *
+     * which means FUTSTK.
+     */
 
     if (
-      !(
-        typ === '13' ||
-        typ === 'FUTSTK' ||
-        typ.includes('FUTSTK')
-      )
+      instrumentType !== '13' &&
+      instrumentType !== 'FUTSTK' &&
+      !instrumentType.includes('FUTSTK')
     ) {
       continue;
     }
 
-    let underlying =
-      String(
-        getField(
-          v,
-          [
-            'underlyingSymbol',
-            'underlying',
-            'underlying_scrip',
-            'shortSym',
-            'short_sym',
-            'exSymName'
-          ]
-        )
-      )
-        .toUpperCase()
-        .trim();
+    /*
+     * Current FYERS NSE exchange/segment:
+     *
+     * exchange = 10
+     * segment = 11
+     *
+     * We only reject when the fields are explicitly present
+     * and clearly belong to another exchange/segment.
+     */
 
-    if (underlying.includes(':')) {
-      underlying =
-        underlying.split(':').pop();
-    }
-
-    underlying =
-      underlying
-        .replace(/-EQ$/, '')
-        .replace(/\s+/g, '');
+    const exchange = String(
+      getField(v, [
+        'exchange',
+        'exExchange'
+      ])
+    )
+      .trim()
+      .toUpperCase();
 
     if (
-      !underlying ||
-      [
+      exchange &&
+      exchange !== '10' &&
+      exchange !== 'NSE'
+    ) {
+      continue;
+    }
+
+    const segment = String(
+      getField(v, [
+        'segment',
+        'exSegment'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    if (
+      segment &&
+      segment !== '11' &&
+      segment !== 'FO'
+    ) {
+      continue;
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * Current FYERS master uses underSym for the underlying
+     * equity symbol.
+     *
+     * Example:
+     *
+     * underSym = PREMIERENE
+     *
+     * Therefore the corresponding cash symbol should be:
+     *
+     * NSE:PREMIERENE-EQ
+     */
+
+    let underlying = String(
+      getField(v, [
+        'underSym',
+        'underlyingSymbol',
+        'underlying',
+        'underlying_scrip',
+        'shortSym',
+        'short_sym'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    /*
+     * Fallback only if underSym is unavailable.
+     */
+
+    if (!underlying) {
+      const candidate = String(
+        getField(v, [
+          'exSymbol',
+          'symTicker',
+          'exSymName'
+        ])
+      )
+        .trim()
+        .toUpperCase();
+
+      if (candidate) {
+        underlying = candidate
+          .replace(/^NSE:/, '')
+          .replace(/-EQ$/, '')
+          .replace(/-FUT.*$/, '')
+          .replace(/\s+(CE|PE)\s*.*$/, '')
+          .trim();
+      }
+    }
+
+    underlying = underlying
+      .replace(/^NSE:/, '')
+      .replace(/-EQ$/, '')
+      .trim();
+
+    if (!underlying) {
+      continue;
+    }
+
+    /*
+     * Exclude index/VIX underlyings.
+     *
+     * We want stocks only.
+     */
+
+    if (
+      new Set([
         'NIFTY',
         'BANKNIFTY',
         'FINNIFTY',
         'MIDCPNIFTY',
+        'NIFTYNXT50',
         'SENSEX',
         'BANKEX'
-      ].includes(underlying)
+      ]).has(underlying)
     ) {
       continue;
     }
 
-    let eq = [
-      `NSE:${underlying}-EQ`,
-      String(
-        getField(
-          v,
-          [
-            'cashSymbol',
-            'equitySymbol',
-            'eqSymbol'
-          ]
-        )
-      )
-    ]
-      .filter(Boolean)
-      .find(s => cm[s]);
+    /*
+     * Multiple monthly futures can exist for the same stock.
+     *
+     * Store only one unique underlying.
+     */
 
-    if (!eq) {
-      const hit =
-        Object.entries(cm).find(
-          ([s, cv]) =>
-            String(
-              getField(
-                cv,
-                [
-                  'shortSymbol',
-                  'shortSym',
-                  'exSymName',
-                  'symDetails'
-                ]
-              )
-            )
-              .toUpperCase() ===
-              underlying &&
-            s.startsWith('NSE:') &&
-            /-EQ$/.test(s)
-        );
+    foUnderlyings.set(
+      underlying,
+      {
+        underlying,
+        sourceKey: masterKey,
+        expiryDate: getField(v, [
+          'expiryDate',
+          'expiry'
+        ])
+      }
+    );
+  }
 
-      if (hit) {
-        eq = hit[0];
+  /*
+   * -------------------------------------------------------
+   * STEP 2
+   * Build lookup maps from NSE cash-market master.
+   * -------------------------------------------------------
+   */
+
+  const cmBySymbol = new Map();
+  const cmByTicker = new Map();
+
+  for (const [masterKey, raw] of Object.entries(cm || {})) {
+    const v = raw || {};
+
+    const exchange = String(
+      getField(v, [
+        'exchange',
+        'exExchange'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    if (
+      exchange &&
+      exchange !== '10' &&
+      exchange !== 'NSE'
+    ) {
+      continue;
+    }
+
+    /*
+     * Current CM master has exSeries.
+     *
+     * We want normal NSE equity series:
+     *
+     * EQ
+     */
+
+    const series = String(
+      getField(v, [
+        'exSeries',
+        'series',
+        'ex_series'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    if (
+      series &&
+      series !== 'EQ'
+    ) {
+      continue;
+    }
+
+    const exSymbol = String(
+      getField(v, [
+        'exSymbol',
+        'ex_symbol'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    const symTicker = String(
+      getField(v, [
+        'symTicker',
+        'symbol',
+        'ticker'
+      ])
+    )
+      .trim()
+      .toUpperCase();
+
+    const exSymName = String(
+      getField(v, [
+        'exSymName',
+        'companyName',
+        'name',
+        'symDetails'
+      ])
+    ).trim();
+
+    /*
+     * Determine the actual FYERS EQ symbol.
+     *
+     * Preferred format:
+     *
+     * NSE:XXXX-EQ
+     */
+
+    const candidates = [
+      exSymbol,
+      symTicker,
+      masterKey
+    ];
+
+    let fyersSymbol = '';
+
+    for (const candidate0 of candidates) {
+      if (!candidate0) {
+        continue;
+      }
+
+      const candidate =
+        String(candidate0)
+          .trim()
+          .toUpperCase();
+
+      /*
+       * Already a complete FYERS symbol.
+       */
+
+      if (
+        /^NSE:[^:]+-EQ$/.test(candidate)
+      ) {
+        fyersSymbol = candidate;
+        break;
+      }
+
+      /*
+       * Symbol already contains -EQ but not NSE:
+       */
+
+      if (
+        /^[A-Z0-9&._-]+-EQ$/.test(candidate)
+      ) {
+        fyersSymbol =
+          `NSE:${candidate}`;
+
+        break;
+      }
+
+      /*
+       * Plain NSE ticker.
+       */
+
+      if (
+        /^[A-Z0-9&._-]+$/.test(candidate) &&
+        candidate !== 'NSE'
+      ) {
+        if (
+          candidate === exSymbol ||
+          candidate === symTicker
+        ) {
+          fyersSymbol =
+            `NSE:${candidate}-EQ`;
+        }
       }
     }
 
-    if (!eq) {
-      eq =
-        `NSE:${underlying}-EQ`;
+    let ticker = exSymbol;
+
+    if (
+      !ticker &&
+      symTicker
+    ) {
+      ticker = symTicker
+        .replace(/^NSE:/, '')
+        .replace(/-EQ$/, '');
     }
 
-    if (!out.has(underlying)) {
-      out.set(
-        underlying,
-        {
-          key: underlying,
-          symbol: eq,
-          name: underlying,
-          sector:
-            SECTOR_MAP[underlying] ||
-            'Other F&O'
-        }
-      );
+    if (
+      !ticker &&
+      fyersSymbol
+    ) {
+      ticker = fyersSymbol
+        .replace(/^NSE:/, '')
+        .replace(/-EQ$/, '');
     }
+
+    ticker = ticker
+      .toUpperCase()
+      .trim();
+
+    if (
+      !ticker ||
+      !fyersSymbol
+    ) {
+      continue;
+    }
+
+    const row = {
+      ticker,
+      symbol: fyersSymbol,
+      name:
+        exSymName ||
+        ticker,
+      masterKey
+    };
+
+    cmBySymbol.set(
+      fyersSymbol,
+      row
+    );
+
+    cmByTicker.set(
+      ticker,
+      row
+    );
   }
 
-  return [
-    ...out.values()
-  ].sort(
-    (a, b) =>
-      a.name.localeCompare(b.name)
+  /*
+   * -------------------------------------------------------
+   * STEP 3
+   * Match every F&O underlying with its NSE EQ instrument.
+   * -------------------------------------------------------
+   */
+
+  const out = [];
+  const unmatched = [];
+
+  for (
+    const [
+      underlying,
+      foInfo
+    ] of foUnderlyings
+  ) {
+    /*
+     * First try exact ticker match.
+     */
+
+    let equity =
+      cmByTicker.get(
+        underlying
+      );
+
+    /*
+     * Secondary exact FYERS symbol lookup.
+     */
+
+    if (!equity) {
+      equity =
+        cmBySymbol.get(
+          `NSE:${underlying}-EQ`
+        );
+    }
+
+    /*
+     * If there is no corresponding NSE EQ instrument,
+     * don't add the stock.
+     */
+
+    if (!equity) {
+      unmatched.push(
+        underlying
+      );
+
+      continue;
+    }
+
+    const ticker =
+      equity.ticker ||
+      underlying;
+
+    out.push({
+      /*
+       * IMPORTANT:
+       *
+       * key is the actual FYERS EQ symbol.
+       *
+       * This makes live quotes, history and WebSocket
+       * all use exactly the same identifier.
+       */
+
+      key:
+        equity.symbol,
+
+      symbol:
+        equity.symbol,
+
+      ticker,
+
+      /*
+       * Human-readable company name from CM master.
+       */
+
+      name:
+        equity.name ||
+        ticker,
+
+      /*
+       * Sector mapping remains on the server.
+       */
+
+      sector:
+        SECTOR_MAP[ticker] ||
+        SECTOR_MAP[underlying] ||
+        'Other F&O'
+    });
+  }
+
+  /*
+   * -------------------------------------------------------
+   * STEP 4
+   * Final deduplication.
+   * -------------------------------------------------------
+   */
+
+  const unique =
+    new Map();
+
+  for (
+    const stock of out
+  ) {
+    unique.set(
+      stock.symbol,
+      stock
+    );
+  }
+
+  const result =
+    [
+      ...unique.values()
+    ].sort(
+      (a, b) =>
+        a.name.localeCompare(
+          b.name
+        )
+    );
+
+  /*
+   * -------------------------------------------------------
+   * DEBUG LOGS
+   * -------------------------------------------------------
+   *
+   * These are deliberately verbose because they will let us
+   * immediately see whether the FYERS master is being parsed
+   * correctly in Render.
+   */
+
+  log(
+    `F&O master scan: ${foUnderlyings.size} unique FUTSTK underlyings -> ${result.length} NSE EQ stocks; ${unmatched.length} unmatched.`
   );
-}
+
+  if (
+    unmatched.length
+  ) {
+    log(
+      `Unmatched F&O underlyings (first 30): ${unmatched
+        .slice(0, 30)
+        .join(', ')}`,
+      'warn'
+    );
+  }
+
+  /*
+   * Explicit Premier Energies check.
+   *
+   * Expected:
+   *
+   * PREMIERENE
+   * ->
+   * NSE:PREMIERENE-EQ
+   */
+
+  const premier =
+    result.find(
+      x =>
+        x.ticker ===
+          'PREMIERENE' ||
+        x.symbol ===
+          'NSE:PREMIERENE-EQ'
+    );
+
+  if (premier) {
+    log(
+      `Verified FYERS equity symbol: PREMIERENE -> ${premier.symbol}.`
+    );
+  } else if (
+    foUnderlyings.has(
+      'PREMIERENE'
+    )
+  ) {
+    log(
+      'PREMIERENE was found in F&O master but could not be matched to NSE EQ master.',
+      'warn'
+    );
+  }
+
+  /*
+   * Show a sample of the actual symbols being sent to FYERS.
+   */
+
+  if (
+    result.length
+  ) {
+    log(
+      `F&O universe sample: ${result
+        .slice(0, 12)
+        .map(x => x.symbol)
+        .join(', ')}`
+    );
+  }
+
+  return result;
+  }
 
 async function ensureUniverse() {
   if (state.universe.length) {
