@@ -806,14 +806,30 @@ async function loadDbHistory(date) {
   );
 
   for (const r of rows) {
-    const t = String(r.candle_time).slice(0, 5);
+    let t = r.candle_time;
+    if (t instanceof Date) {
+      // pg sometimes returns time as Date; format in IST wall-clock is unreliable —
+      // prefer ISO time portion if present, else HH:MM from UTC components is wrong.
+      // Fall back to stringifying via known time string if driver gave a string-like value.
+      t = t.toISOString().slice(11, 16);
+    } else {
+      t = String(t).slice(0, 5);
+    }
+    // Guard against bad parses like "1970-"
+    if (!/^\d{2}:\d{2}$/.test(t)) continue;
+
+    const side = String(r.side || '').toLowerCase();
+    if (side !== 'gainers' && side !== 'losers') continue;
+
     if (!state.history.has(t)) {
       state.history.set(t, { gainers: [], losers: [] });
     }
-    state.history.get(t)[r.side].push({
-      key: r.symbol,
-      name: r.name,
-      sector: r.sector,
+
+    const key = normalizeKey(r.symbol) || normalizeKey(r.name);
+    state.history.get(t)[side].push({
+      key,
+      name: normalizeKey(r.name) || key,
+      sector: r.sector || 'Other F&O',
       pct: Number(r.pct),
       close: r.close == null ? null : Number(r.close),
       rank: Number(r.rank)
@@ -821,8 +837,39 @@ async function loadDbHistory(date) {
   }
 
   if (rows.length) {
-    const times = [...state.history.keys()].sort().join(', ');
-    log(`Restored ${rows.length} ranking rows from Postgres for ${date}. Timeline: ${times}`);
+    const times = [...state.history.keys()].sort();
+    const g920 = state.history.get('09:20')?.gainers?.length || 0;
+    const sampleKeys = (state.history.get('09:20')?.gainers || [])
+      .slice(0, 5)
+      .map(x => x.key)
+      .join(', ');
+    log(
+      `Restored ${rows.length} ranking rows from Postgres for ${date}. ` +
+        `Timeline: ${times.join(', ')}`
+    );
+    log(
+      `09:20 gainers in DB: ${g920}; sample keys: ${sampleKeys || '(none)'}`
+    );
+  }
+}
+
+/** True when stored history is too thin to be useful (old partial rebuilds). */
+function historyIsSparse() {
+  const g = state.history.get('09:20')?.gainers?.length || 0;
+  const minNeeded = Math.min(40, Math.max(20, Math.floor((state.universe.length || 200) * 0.2)));
+  return g < minNeeded;
+}
+
+async function clearDbHistoryForDate(date) {
+  if (!pool) return;
+  try {
+    const r = await pool.query(
+      `DELETE FROM rank_snapshots WHERE trading_date = $1`,
+      [date]
+    );
+    log(`Cleared ${r.rowCount || 0} sparse/incomplete rank_snapshots rows for ${date}.`);
+  } catch (e) {
+    log(`Failed to clear sparse history for ${date}: ${e.message}`, 'warn');
   }
 }
 
@@ -853,6 +900,14 @@ function getField(v, names) {
     if (v?.[n] !== undefined && v?.[n] !== null && v?.[n] !== '') return v[n];
   }
   return '';
+}
+
+/** Normalize any symbol/key to bare underlying ticker (e.g. NSE:RELIANCE-EQ -> RELIANCE). */
+function normalizeKey(s) {
+  let k = String(s || '').toUpperCase().trim();
+  if (k.includes(':')) k = k.split(':').pop();
+  k = k.replace(/-EQ$/i, '').replace(/\s+/g, '');
+  return k;
 }
 
 function buildUniverse(fo, cm) {
@@ -1086,11 +1141,21 @@ async function rebuildHistoryFromFyers(appId, token) {
 
   await loadDbHistory(date);
 
-  if (state.history.size) {
+  if (state.history.size && !historyIsSparse()) {
     log(
       `Restored today's ranking history from PostgreSQL (${state.history.size} snapshots); FYERS rebuild not required.`
     );
     return;
+  }
+
+  if (state.history.size && historyIsSparse()) {
+    const g = state.history.get('09:20')?.gainers?.length || 0;
+    log(
+      `Stored history for ${date} is sparse (09:20 gainers=${g}). Clearing and rebuilding from FYERS…`,
+      'warn'
+    );
+    state.history.clear();
+    await clearDbHistoryForDate(date);
   }
 
   const universe = await ensureUniverse();
@@ -1317,30 +1382,49 @@ function smoothMembership(type, ranked) {
 function mergeRows(type, liveRanked) {
   const rows = smoothMembership(type, liveRanked);
   const base = state.history.get('09:20')?.[type] || [];
-  const baseMap = new Map(base.map(x => [x.key, x.rank]));
+  const baseMap = new Map(
+    base.map(x => [normalizeKey(x.key) || normalizeKey(x.name), x.rank])
+  );
   const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
   const rankMaps = new Map(
     times.map(t => [
       t,
-      new Map((state.history.get(t)?.[type] || []).map(x => [x.key, x.rank]))
+      new Map(
+        (state.history.get(t)?.[type] || []).map(x => [
+          normalizeKey(x.key) || normalizeKey(x.name),
+          x.rank
+        ])
+      )
     ])
   );
 
+  function lookupRank(map, stock) {
+    if (!map) return null;
+    const k1 = normalizeKey(stock.key);
+    if (k1 && map.has(k1)) return map.get(k1);
+    const k2 = normalizeKey(stock.name);
+    if (k2 && map.has(k2)) return map.get(k2);
+    return null;
+  }
+
   return {
     times: [...times, 'CURRENT'],
-    rows: rows.map(x => ({
-      key: x.key,
-      name: x.name,
-      sector: x.sector,
-      pct: x.pct,
-      ltp: x.ltp ?? x.close ?? null,
-      rank: x.rank,
-      rankDelta: baseMap.has(x.key) ? baseMap.get(x.key) - x.rank : null,
-      baselineRank: baseMap.get(x.key) ?? null,
-      history: Object.fromEntries(
-        times.map(t => [t, rankMaps.get(t).get(x.key) ?? null])
-      )
-    }))
+    rows: rows.map(x => {
+      const baseline = lookupRank(baseMap, x);
+      return {
+        key: x.key,
+        name: x.name,
+        sector: x.sector,
+        pct: x.pct,
+        ltp: x.ltp ?? x.close ?? null,
+        rank: x.rank,
+        rankDelta: baseline != null ? baseline - x.rank : null,
+        baselineRank: baseline,
+        history: Object.fromEntries(
+          times.map(t => [t, lookupRank(rankMaps.get(t), x)])
+        )
+      };
+    })
   };
 }
 
@@ -1391,45 +1475,43 @@ function snapshotAtCurrent() {
   const live = rankedLive();
   let displayLive = live;
 
-  if (state.displayMode === 'previous-close') {
+  const useHistorySnapshot = () => {
     const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
     const key = times.length ? times[times.length - 1] : 'CLOSE';
     const h = state.history.get(key);
-    if (h) {
-      displayLive = {
-        gainers: (h.gainers || []).map(x => ({
-          ...x,
-          pct: x.pct,
-          rank: x.rank,
-          ltp: x.close
-        })),
-        losers: (h.losers || []).map(x => ({
-          ...x,
-          pct: x.pct,
-          rank: x.rank,
-          ltp: x.close
-        }))
-      };
-    }
+    if (!h) return false;
+    displayLive = {
+      gainers: (h.gainers || []).map(x => ({
+        ...x,
+        key: normalizeKey(x.key) || normalizeKey(x.name),
+        name: normalizeKey(x.name) || normalizeKey(x.key),
+        pct: x.pct,
+        rank: x.rank,
+        ltp: x.close
+      })),
+      losers: (h.losers || []).map(x => ({
+        ...x,
+        key: normalizeKey(x.key) || normalizeKey(x.name),
+        name: normalizeKey(x.name) || normalizeKey(x.key),
+        pct: x.pct,
+        rank: x.rank,
+        ltp: x.close
+      }))
+    };
+    return true;
+  };
+
+  /*
+   * Pre-open: previous completed session.
+   * After close: prefer last stored 5-min snapshot so historical columns align.
+   * During session with no live quotes yet: fall back to last snapshot.
+   */
+  if (state.displayMode === 'previous-close') {
+    useHistorySnapshot();
+  } else if (regularSessionFinished() && state.history.size) {
+    useHistorySnapshot();
   } else if (!live.gainers.length && state.history.size) {
-    const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
-    const h = state.history.get(times[times.length - 1] || 'CLOSE');
-    if (h) {
-      displayLive = {
-        gainers: (h.gainers || []).map(x => ({
-          ...x,
-          pct: x.pct,
-          rank: x.rank,
-          ltp: x.close
-        })),
-        losers: (h.losers || []).map(x => ({
-          ...x,
-          pct: x.pct,
-          rank: x.rank,
-          ltp: x.close
-        }))
-      };
-    }
+    useHistorySnapshot();
   }
 
   const g = mergeRows('gainers', displayLive.gainers);
