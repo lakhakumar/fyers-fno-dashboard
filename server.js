@@ -301,8 +301,78 @@ function fyersHeaders(appId, token) {
 }
 
 /* ---------------------------------------------------------
-   FYERS HTTP
+   FYERS HTTP / RATE LIMITER
+---------------------------------------------------------
+
+   FYERS Standard currently allows 10 requests/sec and 200
+   requests/minute. The history rebuild previously launched
+   many requests simultaneously, causing HTTP 429 responses.
+
+   Safety margin:
+   - maximum 180 requests in a rolling 60 seconds
+   - minimum 350 ms between request starts
+
+   Every FYERS REST call goes through this queue.
 --------------------------------------------------------- */
+
+const FYERS_SAFE_REQUESTS_PER_MINUTE = 180;
+const FYERS_MIN_REQUEST_GAP_MS = 350;
+
+let fyersRequestTimes = [];
+let fyersLastRequestAt = 0;
+let fyersRateQueue = Promise.resolve();
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function acquireFyersRequestSlot() {
+  const job = fyersRateQueue.then(async () => {
+    while (true) {
+      const now = Date.now();
+
+      fyersRequestTimes =
+        fyersRequestTimes.filter(
+          t => now - t < 60000
+        );
+
+      const waitForGap = Math.max(
+        0,
+        fyersLastRequestAt +
+          FYERS_MIN_REQUEST_GAP_MS -
+          now
+      );
+
+      const waitForMinute =
+        fyersRequestTimes.length >=
+        FYERS_SAFE_REQUESTS_PER_MINUTE
+          ? fyersRequestTimes[0] +
+            60001 -
+            now
+          : 0;
+
+      const wait = Math.max(
+        waitForGap,
+        waitForMinute
+      );
+
+      if (wait <= 0) {
+        break;
+      }
+
+      await sleep(wait);
+    }
+
+    const sentAt = Date.now();
+
+    fyersLastRequestAt = sentAt;
+    fyersRequestTimes.push(sentAt);
+  });
+
+  fyersRateQueue = job.catch(() => {});
+
+  return job;
+}
 
 async function fyersGet(
   base,
@@ -311,6 +381,8 @@ async function fyersGet(
   appId,
   token
 ) {
+  await acquireFyersRequestSlot();
+
   const u = new URL(base + endpoint);
 
   for (const [k, v] of Object.entries(params || {})) {
@@ -829,621 +901,141 @@ function getField(v, names) {
 }
 
 function buildUniverse(fo, cm) {
-  /*
-   * CURRENT FYERS SYMBOL MASTER FORMAT
-   *
-   * NSE_FO_sym_master.json fields include:
-   *
-   *   fyToken
-   *   isin
-   *   exSymbol
-   *   symDetails
-   *   symTicker
-   *   exchange
-   *   segment
-   *   exSymName
-   *   exToken
-   *   exSeries
-   *   optType
-   *   underSym
-   *   underFyTok
-   *   exInstType
-   *   expiryDate
-   *
-   * exInstType:
-   *
-   *   11 = FUTIDX
-   *   12 = FUTIVX
-   *   13 = FUTSTK
-   *   14 = OPTIDX
-   *   15 = OPTSTK
-   *
-   * We only want FUTSTK because the dashboard is for
-   * equity F&O stocks.
-   */
+  const out = new Map();
 
-  const foUnderlyings = new Map();
-
-  /*
-   * -------------------------------------------------------
-   * STEP 1
-   * Read NSE F&O master and collect unique stock
-   * underlyings from FUTSTK contracts.
-   * -------------------------------------------------------
-   */
-
-  for (const [masterKey, raw] of Object.entries(fo || {})) {
-    const v = raw || {};
-
-    const instrumentType = String(
-      getField(v, [
-        'exInstType',
-        'instrumentType',
-        'instrument_type',
-        'type'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    /*
-     * Current FYERS format:
-     *
-     * exInstType = 13
-     *
-     * which means FUTSTK.
-     */
+  for (const [key, v] of Object.entries(fo)) {
+    const typ =
+      String(
+        getField(
+          v,
+          [
+            'instrumentType',
+            'instrument_type',
+            'type'
+          ]
+        )
+      ).toUpperCase();
 
     if (
-      instrumentType !== '13' &&
-      instrumentType !== 'FUTSTK' &&
-      !instrumentType.includes('FUTSTK')
-    ) {
-      continue;
-    }
-
-    /*
-     * Current FYERS NSE exchange/segment:
-     *
-     * exchange = 10
-     * segment = 11
-     *
-     * We only reject when the fields are explicitly present
-     * and clearly belong to another exchange/segment.
-     */
-
-    const exchange = String(
-      getField(v, [
-        'exchange',
-        'exExchange'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    if (
-      exchange &&
-      exchange !== '10' &&
-      exchange !== 'NSE'
-    ) {
-      continue;
-    }
-
-    const segment = String(
-      getField(v, [
-        'segment',
-        'exSegment'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    if (
-      segment &&
-      segment !== '11' &&
-      segment !== 'FO'
-    ) {
-      continue;
-    }
-
-    /*
-     * IMPORTANT:
-     *
-     * Current FYERS master uses underSym for the underlying
-     * equity symbol.
-     *
-     * Example:
-     *
-     * underSym = PREMIERENE
-     *
-     * Therefore the corresponding cash symbol should be:
-     *
-     * NSE:PREMIERENE-EQ
-     */
-
-    let underlying = String(
-      getField(v, [
-        'underSym',
-        'underlyingSymbol',
-        'underlying',
-        'underlying_scrip',
-        'shortSym',
-        'short_sym'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    /*
-     * Fallback only if underSym is unavailable.
-     */
-
-    if (!underlying) {
-      const candidate = String(
-        getField(v, [
-          'exSymbol',
-          'symTicker',
-          'exSymName'
-        ])
+      !(
+        typ === '13' ||
+        typ === 'FUTSTK' ||
+        typ.includes('FUTSTK')
       )
-        .trim()
-        .toUpperCase();
-
-      if (candidate) {
-        underlying = candidate
-          .replace(/^NSE:/, '')
-          .replace(/-EQ$/, '')
-          .replace(/-FUT.*$/, '')
-          .replace(/\s+(CE|PE)\s*.*$/, '')
-          .trim();
-      }
-    }
-
-    underlying = underlying
-      .replace(/^NSE:/, '')
-      .replace(/-EQ$/, '')
-      .trim();
-
-    if (!underlying) {
+    ) {
       continue;
     }
 
-    /*
-     * Exclude index/VIX underlyings.
-     *
-     * We want stocks only.
-     */
+    let underlying =
+      String(
+        getField(
+          v,
+          [
+            'underlyingSymbol',
+            'underlying',
+            'underlying_scrip',
+            'shortSym',
+            'short_sym',
+            'exSymName'
+          ]
+        )
+      )
+        .toUpperCase()
+        .trim();
+
+    if (underlying.includes(':')) {
+      underlying =
+        underlying.split(':').pop();
+    }
+
+    underlying =
+      underlying
+        .replace(/-EQ$/, '')
+        .replace(/\s+/g, '');
 
     if (
-      new Set([
+      !underlying ||
+      [
         'NIFTY',
         'BANKNIFTY',
         'FINNIFTY',
         'MIDCPNIFTY',
-        'NIFTYNXT50',
         'SENSEX',
         'BANKEX'
-      ]).has(underlying)
+      ].includes(underlying)
     ) {
       continue;
     }
 
-    /*
-     * Multiple monthly futures can exist for the same stock.
-     *
-     * Store only one unique underlying.
-     */
-
-    foUnderlyings.set(
-      underlying,
-      {
-        underlying,
-        sourceKey: masterKey,
-        expiryDate: getField(v, [
-          'expiryDate',
-          'expiry'
-        ])
-      }
-    );
-  }
-
-  /*
-   * -------------------------------------------------------
-   * STEP 2
-   * Build lookup maps from NSE cash-market master.
-   * -------------------------------------------------------
-   */
-
-  const cmBySymbol = new Map();
-  const cmByTicker = new Map();
-
-  for (const [masterKey, raw] of Object.entries(cm || {})) {
-    const v = raw || {};
-
-    const exchange = String(
-      getField(v, [
-        'exchange',
-        'exExchange'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    if (
-      exchange &&
-      exchange !== '10' &&
-      exchange !== 'NSE'
-    ) {
-      continue;
-    }
-
-    /*
-     * Current CM master has exSeries.
-     *
-     * We want normal NSE equity series:
-     *
-     * EQ
-     */
-
-    const series = String(
-      getField(v, [
-        'exSeries',
-        'series',
-        'ex_series'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    if (
-      series &&
-      series !== 'EQ'
-    ) {
-      continue;
-    }
-
-    const exSymbol = String(
-      getField(v, [
-        'exSymbol',
-        'ex_symbol'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    const symTicker = String(
-      getField(v, [
-        'symTicker',
-        'symbol',
-        'ticker'
-      ])
-    )
-      .trim()
-      .toUpperCase();
-
-    const exSymName = String(
-      getField(v, [
-        'exSymName',
-        'companyName',
-        'name',
-        'symDetails'
-      ])
-    ).trim();
-
-    /*
-     * Determine the actual FYERS EQ symbol.
-     *
-     * Preferred format:
-     *
-     * NSE:XXXX-EQ
-     */
-
-    const candidates = [
-      exSymbol,
-      symTicker,
-      masterKey
-    ];
-
-    let fyersSymbol = '';
-
-    for (const candidate0 of candidates) {
-      if (!candidate0) {
-        continue;
-      }
-
-      const candidate =
-        String(candidate0)
-          .trim()
-          .toUpperCase();
-
-      /*
-       * Already a complete FYERS symbol.
-       */
-
-      if (
-        /^NSE:[^:]+-EQ$/.test(candidate)
-      ) {
-        fyersSymbol = candidate;
-        break;
-      }
-
-      /*
-       * Symbol already contains -EQ but not NSE:
-       */
-
-      if (
-        /^[A-Z0-9&._-]+-EQ$/.test(candidate)
-      ) {
-        fyersSymbol =
-          `NSE:${candidate}`;
-
-        break;
-      }
-
-      /*
-       * Plain NSE ticker.
-       */
-
-      if (
-        /^[A-Z0-9&._-]+$/.test(candidate) &&
-        candidate !== 'NSE'
-      ) {
-        if (
-          candidate === exSymbol ||
-          candidate === symTicker
-        ) {
-          fyersSymbol =
-            `NSE:${candidate}-EQ`;
-        }
-      }
-    }
-
-    let ticker = exSymbol;
-
-    if (
-      !ticker &&
-      symTicker
-    ) {
-      ticker = symTicker
-        .replace(/^NSE:/, '')
-        .replace(/-EQ$/, '');
-    }
-
-    if (
-      !ticker &&
-      fyersSymbol
-    ) {
-      ticker = fyersSymbol
-        .replace(/^NSE:/, '')
-        .replace(/-EQ$/, '');
-    }
-
-    ticker = ticker
-      .toUpperCase()
-      .trim();
-
-    if (
-      !ticker ||
-      !fyersSymbol
-    ) {
-      continue;
-    }
-
-    const row = {
-      ticker,
-      symbol: fyersSymbol,
-      name:
-        exSymName ||
-        ticker,
-      masterKey
-    };
-
-    cmBySymbol.set(
-      fyersSymbol,
-      row
-    );
-
-    cmByTicker.set(
-      ticker,
-      row
-    );
-  }
-
-  /*
-   * -------------------------------------------------------
-   * STEP 3
-   * Match every F&O underlying with its NSE EQ instrument.
-   * -------------------------------------------------------
-   */
-
-  const out = [];
-  const unmatched = [];
-
-  for (
-    const [
-      underlying,
-      foInfo
-    ] of foUnderlyings
-  ) {
-    /*
-     * First try exact ticker match.
-     */
-
-    let equity =
-      cmByTicker.get(
-        underlying
-      );
-
-    /*
-     * Secondary exact FYERS symbol lookup.
-     */
-
-    if (!equity) {
-      equity =
-        cmBySymbol.get(
-          `NSE:${underlying}-EQ`
-        );
-    }
-
-    /*
-     * If there is no corresponding NSE EQ instrument,
-     * don't add the stock.
-     */
-
-    if (!equity) {
-      unmatched.push(
-        underlying
-      );
-
-      continue;
-    }
-
-    const ticker =
-      equity.ticker ||
-      underlying;
-
-    out.push({
-      /*
-       * IMPORTANT:
-       *
-       * key is the actual FYERS EQ symbol.
-       *
-       * This makes live quotes, history and WebSocket
-       * all use exactly the same identifier.
-       */
-
-      key:
-        equity.symbol,
-
-      symbol:
-        equity.symbol,
-
-      ticker,
-
-      /*
-       * Human-readable company name from CM master.
-       */
-
-      name:
-        equity.name ||
-        ticker,
-
-      /*
-       * Sector mapping remains on the server.
-       */
-
-      sector:
-        SECTOR_MAP[ticker] ||
-        SECTOR_MAP[underlying] ||
-        'Other F&O'
-    });
-  }
-
-  /*
-   * -------------------------------------------------------
-   * STEP 4
-   * Final deduplication.
-   * -------------------------------------------------------
-   */
-
-  const unique =
-    new Map();
-
-  for (
-    const stock of out
-  ) {
-    unique.set(
-      stock.symbol,
-      stock
-    );
-  }
-
-  const result =
-    [
-      ...unique.values()
-    ].sort(
-      (a, b) =>
-        a.name.localeCompare(
-          b.name
+    let eq = [
+      `NSE:${underlying}-EQ`,
+      String(
+        getField(
+          v,
+          [
+            'cashSymbol',
+            'equitySymbol',
+            'eqSymbol'
+          ]
         )
-    );
+      )
+    ]
+      .filter(Boolean)
+      .find(s => cm[s]);
 
-  /*
-   * -------------------------------------------------------
-   * DEBUG LOGS
-   * -------------------------------------------------------
-   *
-   * These are deliberately verbose because they will let us
-   * immediately see whether the FYERS master is being parsed
-   * correctly in Render.
-   */
+    if (!eq) {
+      const hit =
+        Object.entries(cm).find(
+          ([s, cv]) =>
+            String(
+              getField(
+                cv,
+                [
+                  'shortSymbol',
+                  'shortSym',
+                  'exSymName',
+                  'symDetails'
+                ]
+              )
+            )
+              .toUpperCase() ===
+            underlying &&
+            s.startsWith('NSE:') &&
+            /-EQ$/.test(s)
+        );
 
-  log(
-    `F&O master scan: ${foUnderlyings.size} unique FUTSTK underlyings -> ${result.length} NSE EQ stocks; ${unmatched.length} unmatched.`
+      if (hit) {
+        eq = hit[0];
+      }
+    }
+
+    if (!eq) {
+      eq =
+        `NSE:${underlying}-EQ`;
+    }
+
+    if (!out.has(underlying)) {
+      out.set(
+        underlying,
+        {
+          key: underlying,
+          symbol: eq,
+          name: underlying,
+          sector:
+            SECTOR_MAP[underlying] ||
+            'Other F&O'
+        }
+      );
+    }
+  }
+
+  return [
+    ...out.values()
+  ].sort(
+    (a, b) =>
+      a.name.localeCompare(b.name)
   );
-
-  if (
-    unmatched.length
-  ) {
-    log(
-      `Unmatched F&O underlyings (first 30): ${unmatched
-        .slice(0, 30)
-        .join(', ')}`,
-      'warn'
-    );
-  }
-
-  /*
-   * Explicit Premier Energies check.
-   *
-   * Expected:
-   *
-   * PREMIERENE
-   * ->
-   * NSE:PREMIERENE-EQ
-   */
-
-  const premier =
-    result.find(
-      x =>
-        x.ticker ===
-          'PREMIERENE' ||
-        x.symbol ===
-          'NSE:PREMIERENE-EQ'
-    );
-
-  if (premier) {
-    log(
-      `Verified FYERS equity symbol: PREMIERENE -> ${premier.symbol}.`
-    );
-  } else if (
-    foUnderlyings.has(
-      'PREMIERENE'
-    )
-  ) {
-    log(
-      'PREMIERENE was found in F&O master but could not be matched to NSE EQ master.',
-      'warn'
-    );
-  }
-
-  /*
-   * Show a sample of the actual symbols being sent to FYERS.
-   */
-
-  if (
-    result.length
-  ) {
-    log(
-      `F&O universe sample: ${result
-        .slice(0, 12)
-        .map(x => x.symbol)
-        .join(', ')}`
-    );
-  }
-
-  return result;
-  }
+}
 
 async function ensureUniverse() {
   if (state.universe.length) {
@@ -1485,7 +1077,6 @@ function chunks(a, n) {
 
   return r;
 }
-
 async function quotes(
   symbols,
   appId,
@@ -1634,11 +1225,21 @@ async function history5m(
       {
         symbol:
           stock.symbol,
-        resolution: '5',
-        date_format: '0',
-        range_from: from,
-        range_to: to,
-        cont_flag: '1'
+
+        resolution:
+          '5',
+
+        date_format:
+          '0',
+
+        range_from:
+          from,
+
+        range_to:
+          to,
+
+        cont_flag:
+          '1'
       },
       appId,
       token
@@ -1646,14 +1247,27 @@ async function history5m(
 
   return (
     d.candles || []
-  ).map(x => ({
-    ts: Number(x[0]),
-    open: Number(x[1]),
-    high: Number(x[2]),
-    low: Number(x[3]),
-    close: Number(x[4]),
-    volume: Number(x[5])
-  }));
+  ).map(
+    x => ({
+      ts:
+        Number(x[0]),
+
+      open:
+        Number(x[1]),
+
+      high:
+        Number(x[2]),
+
+      low:
+        Number(x[3]),
+
+      close:
+        Number(x[4]),
+
+      volume:
+        Number(x[5])
+    })
+  );
 }
 
 async function previousCloseFor(
@@ -1682,11 +1296,21 @@ async function previousCloseFor(
       {
         symbol:
           stock.symbol,
-        resolution: 'D',
-        date_format: '0',
-        range_from: from,
-        range_to: to,
-        cont_flag: '1'
+
+        resolution:
+          'D',
+
+        date_format:
+          '0',
+
+        range_from:
+          from,
+
+        range_to:
+          to,
+
+        cont_flag:
+          '1'
       },
       appId,
       token
@@ -1697,7 +1321,9 @@ async function previousCloseFor(
 
   return cs.length
     ? Number(
-        cs[cs.length - 1][4]
+        cs[
+          cs.length - 1
+        ][4]
       )
     : null;
 }
@@ -1716,9 +1342,12 @@ async function rebuildHistoryFromFyers(
   appId,
   token
 ) {
-  const date = istToday();
+  const date =
+    istToday();
 
-  if (!regularSessionStarted()) {
+  if (
+    !regularSessionStarted()
+  ) {
     await loadLatestCompletedSession(
       appId,
       token
@@ -1731,12 +1360,18 @@ async function rebuildHistoryFromFyers(
     state.currentDay !== date ||
     state.displayMode !== 'current'
   ) {
-    resetSession(date);
+    resetSession(
+      date
+    );
   }
 
-  await loadDbHistory(date);
+  await loadDbHistory(
+    date
+  );
 
-  if (state.history.size) {
+  if (
+    state.history.size
+  ) {
     return;
   }
 
@@ -1748,6 +1383,46 @@ async function rebuildHistoryFromFyers(
     'info'
   );
 
+  const previousCloseMap =
+    new Map();
+
+  try {
+    const quoteRows =
+      await quotes(
+        universe.map(
+          x => x.symbol
+        ),
+        appId,
+        token
+      );
+
+    for (
+      const q of quoteRows
+    ) {
+      if (
+        q.symbol &&
+        Number.isFinite(
+          q.prev
+        ) &&
+        q.prev > 0
+      ) {
+        previousCloseMap.set(
+          q.symbol,
+          q.prev
+        );
+      }
+    }
+
+    log(
+      `Previous-close values loaded from FYERS quotes: ${previousCloseMap.size}/${universe.length} stocks.`
+    );
+  } catch (e) {
+    log(
+      `Bulk previous-close quote request failed: ${e.message}`,
+      'warn'
+    );
+  }
+
   const rows = [];
 
   for (
@@ -1756,32 +1431,51 @@ async function rebuildHistoryFromFyers(
     i += 6
   ) {
     const batch =
-      universe.slice(i, i + 6);
+      universe.slice(
+        i,
+        i + 6
+      );
 
     const result =
       await Promise.all(
         batch.map(
           async stock => {
             try {
-              const [
-                cs,
-                prev
-              ] =
-                await Promise.all([
-                  history5m(
-                    stock,
-                    appId,
-                    token,
-                    date
-                  ),
+              const cs =
+                await history5m(
+                  stock,
+                  appId,
+                  token,
+                  date
+                );
 
-                  previousCloseFor(
-                    stock,
-                    appId,
-                    token,
-                    date
-                  )
-                ]);
+              let prev =
+                previousCloseMap.get(
+                  stock.symbol
+                );
+
+              if (
+                !Number.isFinite(prev) ||
+                prev <= 0
+              ) {
+                try {
+                  prev =
+                    await previousCloseFor(
+                      stock,
+                      appId,
+                      token,
+                      date
+                    );
+                } catch (e) {
+                  log(
+                    `${stock.name}: previous-close fallback failed: ${e.message}`,
+                    'warn'
+                  );
+
+                  prev =
+                    null;
+                }
+              }
 
               return {
                 stock,
@@ -1801,19 +1495,30 @@ async function rebuildHistoryFromFyers(
       );
 
     rows.push(
-      ...result.filter(Boolean)
+      ...result.filter(
+        Boolean
+      )
     );
   }
 
   const buckets =
     new Map();
 
-  for (const r of rows) {
-    if (!r.prev) {
+  for (
+    const r of rows
+  ) {
+    if (
+      !Number.isFinite(
+        r.prev
+      ) ||
+      r.prev <= 0
+    ) {
       continue;
     }
 
-    for (const c of r.cs) {
+    for (
+      const c of r.cs
+    ) {
       const closeEpoch =
         c.ts + 300;
 
@@ -1825,8 +1530,12 @@ async function rebuildHistoryFromFyers(
           {
             timeZone:
               'Asia/Kolkata',
-            hour: '2-digit',
-            minute: '2-digit'
+
+            hour:
+              '2-digit',
+
+            minute:
+              '2-digit'
           }
         );
 
@@ -1837,21 +1546,29 @@ async function rebuildHistoryFromFyers(
         continue;
       }
 
-      if (!buckets.has(t)) {
+      if (
+        !buckets.has(t)
+      ) {
         buckets.set(
           t,
           []
         );
       }
 
-      buckets.get(t).push({
-        ...r.stock,
-        close: c.close,
-        pct: pct(
-          c.close,
-          r.prev
-        )
-      });
+      buckets
+        .get(t)
+        .push({
+          ...r.stock,
+
+          close:
+            c.close,
+
+          pct:
+            pct(
+              c.close,
+              r.prev
+            )
+        });
     }
   }
 
@@ -1866,12 +1583,14 @@ async function rebuildHistoryFromFyers(
       ]
         .sort(
           (a, b) =>
-            b.pct - a.pct
+            b.pct -
+            a.pct
         )
         .map(
           (x, i) => ({
             ...x,
-            rank: i + 1
+            rank:
+              i + 1
           })
         );
 
@@ -1881,20 +1600,25 @@ async function rebuildHistoryFromFyers(
       ]
         .sort(
           (a, b) =>
-            a.pct - b.pct
+            a.pct -
+            b.pct
         )
         .map(
           (x, i) => ({
             ...x,
-            rank: i + 1
+            rank:
+              i + 1
           })
         );
 
     state.history.set(
       t,
       {
-        gainers: g,
-        losers: l
+        gainers:
+          g,
+
+        losers:
+          l
       }
     );
 
@@ -1915,6 +1639,10 @@ async function rebuildHistoryFromFyers(
 
   log(
     `Historical ranking rebuild complete for ${date}: ${state.history.size} five-minute snapshots.`
+  );
+
+  log(
+    `Historical stocks successfully loaded: ${rows.length}/${universe.length}.`
   );
 }
 
@@ -2286,34 +2014,32 @@ function sectorData(live) {
       key: x.key,
       name: x.name,
       pct: x.pct,
-      ltp: x.ltp,
-      sector: s
+      ltp: x.ltp
     });
   }
 
   return [
     ...map.values()
   ]
-    .map(z => ({
-      ...z,
-
-      avgPct:
-        z.count
-          ? z.sum / z.count
+    .map(x => ({
+      ...x,
+      averagePct:
+        x.count
+          ? x.sum / x.count
           : 0,
 
       stocks:
-        z.stocks.sort(
+        x.stocks.sort(
           (a, b) =>
             b.pct - a.pct
         )
     }))
     .sort(
       (a, b) =>
-        b.avgPct - a.avgPct
+        b.averagePct -
+        a.averagePct
     );
 }
-
 /* ---------------------------------------------------------
    CURRENT SNAPSHOT
 --------------------------------------------------------- */
@@ -2477,6 +2203,7 @@ function snapshotAtCurrent() {
   };
 }
 
+
 /* ---------------------------------------------------------
    5-MINUTE SNAPSHOT
 --------------------------------------------------------- */
@@ -2589,6 +2316,7 @@ async function makeCandleSnapshot() {
 
   broadcastDashboard();
 }
+
 
 /* ---------------------------------------------------------
    FYERS DATA WEBSOCKET
@@ -2719,6 +2447,7 @@ function startFyersSocket() {
   skt.connect();
 }
 
+
 /* ---------------------------------------------------------
    BROWSER WEBSOCKET
 --------------------------------------------------------- */
@@ -2775,6 +2504,7 @@ function broadcastDashboard() {
       250
     );
 }
+
 
 /* ---------------------------------------------------------
    DASHBOARD DATA
@@ -2894,6 +2624,7 @@ async function dashboardData() {
   };
 }
 
+
 /* ---------------------------------------------------------
    HTTP HELPERS
 --------------------------------------------------------- */
@@ -2980,285 +2711,16 @@ function send(
   );
 
   res.end(
-    type ===
-      'application/json'
+    type === 'application/json'
       ? JSON.stringify(data)
       : data
   );
 }
-
 /* ---------------------------------------------------------
-   HTTP ROUTER
+   HTTP ROUTER — END
 --------------------------------------------------------- */
 
-async function route(
-  req,
-  res
-) {
-  if (
-    req.method ===
-    'OPTIONS'
-  ) {
-    return send(
-      res,
-      204,
-      ''
-    );
-  }
-
-  const u =
-    new URL(
-      req.url,
-      `http://${req.headers.host}`
-    );
-
-  try {
-    /*
-     * Health endpoint
-     */
-
-    if (
-      req.method === 'GET' &&
-      u.pathname ===
-        '/api/health'
-    ) {
-      return send(
-        res,
-        200,
-        {
-          ok: true,
-
-          time:
-            istParts(),
-
-          marketOpen:
-            marketOpenNow(),
-
-          universeSize:
-            state.universe.length,
-
-          wsConnected:
-            state.fyers.connected,
-
-          persistence:
-            !!pool
-        }
-      );
     }
-
-    /*
-     * LOGIN
-     */
-
-    if (
-      req.method === 'POST' &&
-      u.pathname ===
-        '/api/login'
-    ) {
-      const body =
-        await readBody(req);
-
-      const appId =
-        String(
-          body.appId || ''
-        ).trim();
-
-      const token =
-        String(
-          body.accessToken || ''
-        ).trim();
-
-      if (
-        !appId ||
-        !token
-      ) {
-        return send(
-          res,
-          400,
-          {
-            ok: false,
-            error:
-              'App ID and access token are required.'
-          }
-        );
-      }
-
-      /*
-       * Validate FYERS credentials
-       */
-
-      await fyersGet(
-        API_HOST,
-        '/profile',
-        {},
-        appId,
-        token
-      );
-
-      state.fyers.appId =
-        appId;
-
-      state.fyers.token =
-        token;
-
-      state.currentDay =
-        '';
-
-      state.displayDate =
-        '';
-
-      state.displayMode =
-        'current';
-
-      state.history.clear();
-
-      state.live.clear();
-
-      state.indices.clear();
-
-      state.membership = {
-        gainers: [],
-        losers: []
-      };
-
-      await ensureUniverse();
-
-      /*
-       * Important:
-       * This determines whether the dashboard should show:
-       *
-       * previous completed session
-       * OR
-       * current trading session
-       */
-
-      await rebuildHistoryFromFyers(
-        appId,
-        token
-      );
-
-      startFyersSocket();
-
-      log(
-        `FYERS login validated for ${appId.slice(0, 10)}…`
-      );
-
-      return send(
-        res,
-        200,
-        {
-          ok: true
-        }
-      );
-    }
-
-    const appId =
-      req.headers[
-        'x-fyers-app-id'
-      ];
-
-    const token =
-      req.headers[
-        'x-fyers-access-token'
-      ];
-
-    if (
-      !appId ||
-      !token ||
-      appId !==
-        state.fyers.appId ||
-      token !==
-        state.fyers.token
-    ) {
-      return send(
-        res,
-        401,
-        {
-          ok: false,
-          error:
-            'Not authenticated.'
-        }
-      );
-    }
-
-    /*
-     * LOGOUT
-     */
-
-    if (
-      req.method === 'POST' &&
-      u.pathname ===
-        '/api/logout'
-    ) {
-      try {
-        state.fyers.socket?.close();
-      } catch {}
-
-      state.fyers = {
-        appId: '',
-        token: '',
-        socket: null,
-        connected: false,
-        reconnectTimer: null
-      };
-
-      state.live.clear();
-      state.indices.clear();
-
-      return send(
-        res,
-        200,
-        {
-          ok: true
-        }
-      );
-    }
-
-    /*
-     * DASHBOARD
-     */
-
-    if (
-      req.method === 'GET' &&
-      u.pathname ===
-        '/api/dashboard'
-    ) {
-      return send(
-        res,
-        200,
-        await dashboardData()
-      );
-    }
-
-    /*
-     * LOGS
-     */
-
-    if (
-      req.method === 'GET' &&
-      u.pathname ===
-        '/api/logs'
-    ) {
-      return send(
-        res,
-        200,
-        {
-          logs:
-            state.log.slice(
-              -100
-            )
-        }
-      );
-    }
-
-    return send(
-      res,
-      404,
-      {
-        ok: false,
-        error: 'Not found'
-      }
-    );
   } catch (e) {
     log(
       e.message,
@@ -3279,6 +2741,7 @@ async function route(
     );
   }
 }
+
 
 /* ---------------------------------------------------------
    HTTP SERVER
@@ -3348,6 +2811,7 @@ const server =
       );
     }
   );
+
 
 /* ---------------------------------------------------------
    BROWSER WEBSOCKET SERVER
@@ -3431,6 +2895,7 @@ server.on(
   }
 );
 
+
 /* ---------------------------------------------------------
    SESSION MONITOR
 --------------------------------------------------------- */
@@ -3511,6 +2976,7 @@ setInterval(
   5000
 );
 
+
 /* ---------------------------------------------------------
    5-MINUTE SNAPSHOT TIMER
 --------------------------------------------------------- */
@@ -3529,6 +2995,7 @@ setInterval(
   15000
 );
 
+
 /* ---------------------------------------------------------
    DASHBOARD BROADCAST
 --------------------------------------------------------- */
@@ -3544,6 +3011,7 @@ setInterval(
   },
   5000
 );
+
 
 /* ---------------------------------------------------------
    START
