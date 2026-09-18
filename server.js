@@ -1236,7 +1236,7 @@ async function rebuildHistoryFromFyers(appId, token) {
         hour: '2-digit',
         minute: '2-digit'
       });
-      if (t < '09:20' || t > '15:25') continue;
+      if (t < '09:20' || t > '15:30') continue;
       if (!buckets.has(t)) buckets.set(t, []);
       buckets.get(t).push({
         ...r.stock,
@@ -1541,22 +1541,83 @@ function snapshotAtCurrent() {
 }
 
 /* ---------------------------------------------------------
+   FINAL CLOSE SNAPSHOT (15:30)
+   NSE continuous trading ends at 15:30. If history only reaches
+   15:25, materialize a 15:30 ranking from the latest live quotes
+   so day-end ranks reflect the official close.
+--------------------------------------------------------- */
+
+async function ensureFinalCloseSnapshot() {
+  if (!state.fyers.appId || state.displayMode !== 'current') return;
+  if (!regularSessionFinished()) return;
+
+  const date = istToday();
+  if (state.currentDay && state.currentDay !== date) return;
+
+  const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
+  const last = times.length ? times[times.length - 1] : '';
+  if (last >= '15:30') return;
+
+  const live = rankedLive();
+  if (
+    live.gainers.length <
+    Math.max(30, Math.floor((state.universe.length || 100) * 0.25))
+  ) {
+    log(
+      `Cannot build 15:30 close ranking yet: only ${live.gainers.length} live symbols.`,
+      'warn'
+    );
+    return;
+  }
+
+  const g = live.gainers.map(x => ({ ...x, close: x.ltp }));
+  const l = live.losers.map(x => ({ ...x, close: x.ltp }));
+  state.history.set('15:30', { gainers: g, losers: l });
+
+  try {
+    await saveSnapshot(date, '15:30', 'gainers', g);
+    await saveSnapshot(date, '15:30', 'losers', l);
+    log(
+      `Saved 15:30 day-end ranking snapshot (previous last was ${last || 'none'}). ` +
+        `Top gainers: ${g
+          .slice(0, 3)
+          .map(x => x.name)
+          .join(', ')}`
+    );
+  } catch (e) {
+    log(`15:30 close snapshot DB error: ${e.message}`, 'warn');
+  }
+
+  broadcastDashboard();
+}
+
+/* ---------------------------------------------------------
    5-MINUTE SNAPSHOT
 --------------------------------------------------------- */
 
 async function makeCandleSnapshot() {
-  if (!marketOpenNow() || !state.fyers.appId || state.displayMode !== 'current') {
+  if (!state.fyers.appId || state.displayMode !== 'current') {
     return;
   }
 
   const now = istParts();
-  const minute = Number(now.time.slice(3, 5));
-  if (minute % 5 !== 0) return;
-
   const t = now.time.slice(0, 5);
   const date = now.date;
 
-  if (t < '09:20' || t > '15:25' || state.history.has(t)) return;
+  /*
+   * Rank window: 09:20 .. 15:30 IST (NSE continuous session ends 15:30).
+   * Allow the 15:30 snapshot even though marketOpenNow() becomes false at 15:30.
+   * Closing-session prices (15:40 call) are captured via history rebuild using
+   * range_to 15:40 when FYERS returns a final bar; live WS may already be quiet.
+   */
+  if (t < '09:20' || t > '15:30') return;
+
+  const minute = Number(now.time.slice(3, 5));
+  // Fire on :00/:05/.../:30, and also once in the first minute after 15:30 for safety
+  const atCloseGrace = t === '15:30' && Number(now.time.slice(6, 8)) <= 45;
+  if (minute % 5 !== 0 && !atCloseGrace) return;
+
+  if (state.history.has(t)) return;
 
   const live = rankedLive();
   if (live.gainers.length < Math.max(50, Math.floor(state.universe.length * 0.5))) {
@@ -2030,6 +2091,12 @@ setInterval(async () => {
 setInterval(() => {
   makeCandleSnapshot().catch(e => log(`Snapshot timer: ${e.message}`, 'warn'));
 }, 15000);
+
+setInterval(() => {
+  ensureFinalCloseSnapshot().catch(e =>
+    log(`Final close snapshot: ${e.message}`, 'warn')
+  );
+}, 30000);
 
 /* ---------------------------------------------------------
    DASHBOARD BROADCAST
