@@ -1,0 +1,19 @@
+{
+  "name": "fno-rank-dashboard-v2",
+  "version": "2.0.0",
+  "private": true,
+  "description": "FYERS F&O live rank and 5-minute intraday ranking dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fyers-api-v3": "^2.2.0",
+    "pg": "^8.16.3",
+    "ws": "^8.18.3"
+  }
+}
