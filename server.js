@@ -510,6 +510,21 @@ function istToday() {
   return istParts().date;
 }
 
+/** Normalize any Date / string to YYYY-MM-DD for Postgres and state. */
+function toISODate(value) {
+  if (value == null || value === '') return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  }
+  const s = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  }
+  return null;
+}
+
 /**
  * NSE equity cash/F&O regular session is Mon–Fri.
  * Holidays still need calendar handling; weekends must never be treated as a live session day.
@@ -675,6 +690,12 @@ async function initDb() {
 async function saveSnapshot(date, time, side, rows) {
   if (!pool || !rows?.length) return;
 
+  const iso = toISODate(date);
+  if (!iso) {
+    log(`saveSnapshot: invalid date ${date}`, 'warn');
+    return;
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -693,7 +714,7 @@ async function saveSnapshot(date, time, side, rows) {
           close = EXCLUDED.close
         `,
         [
-          date,
+          iso,
           time,
           side,
           r.rank,
@@ -721,7 +742,7 @@ async function latestStoredTradingDate() {
     `SELECT MAX(trading_date) AS d FROM rank_snapshots WHERE trading_date < $1`,
     [today]
   );
-  return rows[0]?.d ? String(rows[0].d).slice(0, 10) : null;
+  return toISODate(rows[0]?.d);
 }
 
 /* ---------------------------------------------------------
@@ -746,12 +767,13 @@ async function loadLatestCompletedSession(appId, token) {
   const stored = await latestStoredTradingDate();
 
   if (stored) {
-    state.currentDay = stored;
-    state.displayDate = stored;
+    const storedIso = toISODate(stored);
+    state.currentDay = storedIso;
+    state.displayDate = storedIso;
     state.displayMode = 'previous-close';
     state.history.clear();
     state.membership = { gainers: [], losers: [] };
-    await loadDbHistory(stored);
+    await loadDbHistory(storedIso);
     if (state.history.size) {
       log(`Pre-open mode: showing last completed trading session ${stored}.`);
       return stored;
@@ -837,6 +859,12 @@ async function loadLatestCompletedSession(appId, token) {
 async function loadDbHistory(date) {
   if (!pool) return;
 
+  const iso = toISODate(date);
+  if (!iso) {
+    log(`loadDbHistory: invalid date ${date}`, 'warn');
+    return;
+  }
+
   const { rows } = await pool.query(
     `
     SELECT trading_date, candle_time, side, rank, symbol, name, sector, pct, close
@@ -844,7 +872,7 @@ async function loadDbHistory(date) {
     WHERE trading_date = $1
     ORDER BY candle_time, side, rank
     `,
-    [date]
+    [iso]
   );
 
   for (const r of rows) {
@@ -886,7 +914,7 @@ async function loadDbHistory(date) {
       .map(x => x.key)
       .join(', ');
     log(
-      `Restored ${rows.length} ranking rows from Postgres for ${date}. ` +
+      `Restored ${rows.length} ranking rows from Postgres for ${iso}. ` +
         `Timeline: ${times.join(', ')}`
     );
     log(
@@ -904,14 +932,16 @@ function historyIsSparse() {
 
 async function clearDbHistoryForDate(date) {
   if (!pool) return;
+  const iso = toISODate(date);
+  if (!iso) return;
   try {
     const r = await pool.query(
       `DELETE FROM rank_snapshots WHERE trading_date = $1`,
-      [date]
+      [iso]
     );
-    log(`Cleared ${r.rowCount || 0} sparse/incomplete rank_snapshots rows for ${date}.`);
+    log(`Cleared ${r.rowCount || 0} sparse/incomplete rank_snapshots rows for ${iso}.`);
   } catch (e) {
-    log(`Failed to clear sparse history for ${date}: ${e.message}`, 'warn');
+    log(`Failed to clear sparse history for ${iso}: ${e.message}`, 'warn');
   }
 }
 
@@ -2239,7 +2269,7 @@ async function route(req, res) {
       await ensureUniverse();
 
       try {
-        if (!regularSessionStarted()) {
+        if (!isTradingSessionDay() || !regularSessionStarted()) {
           await loadLatestCompletedSession(appId, accessToken);
         } else {
           await rebuildHistoryFromFyers(appId, accessToken);
@@ -2269,6 +2299,21 @@ async function route(req, res) {
           if (row.symbol) state.live.set(row.symbol, row);
         }
         log(`Seeded live quotes for ${q.length} symbols.`);
+        // If history is still empty (weekend / DB date error), materialize ranks from live quotes
+        if (!state.history.size) {
+          const live = rankedLive();
+          if (live.gainers.length) {
+            state.history.set('CLOSE', {
+              gainers: live.gainers,
+              losers: live.losers
+            });
+            if (!state.displayMode) state.displayMode = 'previous-close';
+            if (!state.displayDate) state.displayDate = istToday();
+            log(
+              `Built CLOSE ranking from live quotes (${live.gainers.length} stocks) as history fallback.`
+            );
+          }
+        }
       } catch (e) {
         log(`Live quote seed failed: ${e.message}`, 'warn');
       }
