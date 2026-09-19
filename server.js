@@ -445,8 +445,10 @@ const state = {
   displayMode: 'current',
   live: new Map(),
   indices: new Map(),
-  /** symbol -> { high, low, close, date } previous trading day OHLC */
+  /** symbol -> previous trading day OHLC + volume MA */
   d1Levels: new Map(),
+  /** symbol -> { orHigh, orLow, vwap, maxBarVol, highVolume, ... } from today's 5m bars */
+  intradaily: new Map(),
   membership: {
     gainers: [],
     losers: []
@@ -982,6 +984,23 @@ function normalizeKey(s) {
   return k;
 }
 
+function slugifyCompanyName(fullName, fallbackTicker) {
+  let s = String(fullName || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/\+/g, ' plus ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+  // Groww often drops trailing "limited" variants inconsistently; keep a usable slug
+  if (!s || s.length < 2) {
+    s = String(fallbackTicker || 'stock')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-');
+  }
+  return s;
+}
+
 function buildUniverse(fo, cm) {
   const out = new Map();
   let futstkCount = 0;
@@ -1048,11 +1067,18 @@ function buildUniverse(fo, cm) {
     const displayName =
       String(getField(cmRow, ['exSymbol', 'underSym', 'short_name'])).toUpperCase() ||
       underlying;
+    const fullName = String(
+      getField(cmRow, ['exSymName', 'symDetails', 'symbolDesc']) || displayName
+    );
+    const growwSlug = slugifyCompanyName(fullName, underlying);
 
     out.set(underlying, {
       key: underlying,
       symbol: eq,
       name: displayName,
+      fullName,
+      growwSlug,
+      growwUrl: `https://groww.in/charts/stocks/${growwSlug}?exchange=NSE`,
       sector: SECTOR_MAP[underlying] || 'Other F&O'
     });
   }
@@ -1324,6 +1350,117 @@ async function loadD1Levels(appId, token) {
   );
 }
 
+/**
+ * Load today's (or last session day's) 5-minute bars to compute:
+ * - Opening range (09:15–09:30 IST): orHigh / orLow
+ * - Session VWAP from 5m bars
+ * - High-volume spike: any bar vol >= 5 × (10d avg daily vol / 75)
+ */
+async function loadIntradayMetrics(appId, token) {
+  const universe = await ensureUniverse();
+  let sessionDate = istToday();
+  if (!isTradingSessionDay() || !regularSessionStarted()) {
+    // Prefer last history day or last D-1 date
+    const histDates = [];
+    // use max d1 date from levels
+    for (const v of state.d1Levels.values()) {
+      if (v.date) histDates.push(v.date);
+    }
+    histDates.sort();
+    if (histDates.length) sessionDate = histDates[histDates.length - 1];
+  }
+
+  let ok = 0;
+  let fail = 0;
+  const BARS_PER_DAY = 75;
+
+  for (let i = 0; i < universe.length; i += 6) {
+    const batch = universe.slice(i, i + 6);
+    const result = await Promise.all(
+      batch.map(async stock => {
+        try {
+          const cs = await history5m(stock, appId, token, sessionDate);
+          if (!cs.length) return null;
+
+          let orHigh = null;
+          let orLow = null;
+          let pv = 0;
+          let vv = 0;
+          let maxBarVol = 0;
+
+          for (const c of cs) {
+            const closeEpoch = c.ts + 300;
+            const t = new Date(closeEpoch * 1000).toLocaleTimeString('en-GB', {
+              timeZone: 'Asia/Kolkata',
+              hour: '2-digit',
+              minute: '2-digit'
+            });
+            // Opening range: bars whose close time is in 09:20..09:30
+            // (covers 09:15-09:20 and 09:20-09:25 and 09:25-09:30 opens)
+            if (t >= '09:20' && t <= '09:30') {
+              orHigh =
+                orHigh == null ? c.high : Math.max(orHigh, c.high);
+              orLow = orLow == null ? c.low : Math.min(orLow, c.low);
+            }
+
+            const vol = Number(c.volume) || 0;
+            if (vol > maxBarVol) maxBarVol = vol;
+
+            const typical = (c.high + c.low + c.close) / 3;
+            if (vol > 0 && Number.isFinite(typical)) {
+              pv += typical * vol;
+              vv += vol;
+            }
+          }
+
+          // Also include first bar open 09:15 close 09:20 if labeled 09:20
+          // OR window already covers 09:20-09:30 closes
+
+          const vwap = vv > 0 ? pv / vv : null;
+          const d1 = state.d1Levels.get(stock.symbol);
+          const avgVolume = d1 && Number.isFinite(d1.avgVolume) ? d1.avgVolume : null;
+          const typicalBar = avgVolume && avgVolume > 0 ? avgVolume / BARS_PER_DAY : null;
+          const highVolume =
+            typicalBar != null && maxBarVol >= 5 * typicalBar;
+          const barVolRatio =
+            typicalBar && typicalBar > 0 ? maxBarVol / typicalBar : null;
+
+          return {
+            symbol: stock.symbol,
+            key: stock.key,
+            sessionDate,
+            orHigh,
+            orLow,
+            vwap,
+            maxBarVol,
+            barVolRatio,
+            highVolume,
+            bars: cs.length
+          };
+        } catch (e) {
+          return null;
+        }
+      })
+    );
+
+    for (const row of result) {
+      if (!row) {
+        fail++;
+        continue;
+      }
+      state.intradaily.set(row.symbol, row);
+      ok++;
+    }
+  }
+
+  log(
+    `Intraday metrics (OR 15m / VWAP / vol spike) loaded for ${ok}/${universe.length} on ${sessionDate}` +
+      (fail ? ` (${fail} unavailable)` : '') +
+      '.'
+  );
+}
+
+
 function lookupD1(row) {
   let d1 = row.symbol ? state.d1Levels.get(row.symbol) : null;
   if (!d1 && row.key) {
@@ -1337,8 +1474,22 @@ function lookupD1(row) {
   return d1 || null;
 }
 
+function lookupIntraday(row) {
+  let m = row.symbol ? state.intradaily.get(row.symbol) : null;
+  if (!m && row.key) {
+    for (const v of state.intradaily.values()) {
+      if (v.key === row.key) {
+        m = v;
+        break;
+      }
+    }
+  }
+  return m || null;
+}
+
 function attachD1Flags(row) {
   const d1 = lookupD1(row);
+  const intra = lookupIntraday(row);
   const ltp = Number(row.ltp ?? row.close);
   const d1High = d1 && Number.isFinite(d1.high) ? d1.high : null;
   const d1Low = d1 && Number.isFinite(d1.low) ? d1.low : null;
@@ -1349,7 +1500,6 @@ function attachD1Flags(row) {
   const consolidation = !!(d1 && d1.consolidation);
   const avgVolume = d1 && Number.isFinite(d1.avgVolume) ? d1.avgVolume : null;
 
-  // Prefer live quote volume (intraday cumulative); fall back to daily today bar
   const liveVol = Number(row.volume);
   const todayVolume =
     Number.isFinite(liveVol) && liveVol > 0
@@ -1358,16 +1508,47 @@ function attachD1Flags(row) {
         ? d1.todayVolumeFromDaily
         : null;
 
+  // Day volume vs 10d MA (informational)
   const volumeRatio =
     avgVolume && todayVolume != null && avgVolume > 0
       ? todayVolume / avgVolume
       : null;
-  const highVolume = volumeRatio != null && volumeRatio >= 1.5;
+
+  /*
+   * High volume (scanner): any of today's 5-minute candles has volume
+   * >= 5 × typical bar size, where typical bar ≈ 10-day avg daily volume / 75
+   * (≈ number of 5m bars in 09:15–15:30).
+   */
+  const typicalBarVol =
+    avgVolume && avgVolume > 0 ? avgVolume / 75 : null;
+  const maxBarVol = intra && Number.isFinite(intra.maxBarVol) ? intra.maxBarVol : null;
+  const barVolRatio =
+    typicalBarVol && maxBarVol != null && typicalBarVol > 0
+      ? maxBarVol / typicalBarVol
+      : null;
+  const highVolume =
+    (intra && intra.highVolume) ||
+    (barVolRatio != null && barVolRatio >= 5);
+
+  const orHigh = intra && Number.isFinite(intra.orHigh) ? intra.orHigh : null;
+  const orLow = intra && Number.isFinite(intra.orLow) ? intra.orLow : null;
+  const vwap = intra && Number.isFinite(intra.vwap) ? intra.vwap : null;
 
   const aboveD1High =
     d1High != null && Number.isFinite(ltp) ? ltp > d1High : false;
   const belowD1Low =
     d1Low != null && Number.isFinite(ltp) ? ltp < d1Low : false;
+  const aboveOrHigh =
+    orHigh != null && Number.isFinite(ltp) ? ltp > orHigh : false;
+  const belowOrLow =
+    orLow != null && Number.isFinite(ltp) ? ltp < orLow : false;
+  const aboveVwap =
+    vwap != null && Number.isFinite(ltp) ? ltp > vwap : false;
+  const belowVwap =
+    vwap != null && Number.isFinite(ltp) ? ltp < vwap : false;
+
+  const stockMeta =
+    state.universe.find(s => s.key === row.key || s.symbol === row.symbol) || {};
 
   return {
     ...row,
@@ -1382,9 +1563,20 @@ function attachD1Flags(row) {
     avgVolume,
     todayVolume,
     volumeRatio,
+    maxBarVol,
+    barVolRatio,
     highVolume,
+    orHigh,
+    orLow,
+    vwap,
     aboveD1High,
-    belowD1Low
+    belowD1Low,
+    aboveOrHigh,
+    belowOrLow,
+    aboveVwap,
+    belowVwap,
+    growwUrl: row.growwUrl || stockMeta.growwUrl || null,
+    fullName: row.fullName || stockMeta.fullName || row.name
   };
 }
 
@@ -1735,8 +1927,18 @@ function mergeRows(type, liveRanked) {
         todayVolume: enriched.todayVolume,
         volumeRatio: enriched.volumeRatio,
         highVolume: enriched.highVolume,
+        maxBarVol: enriched.maxBarVol,
+        barVolRatio: enriched.barVolRatio,
+        orHigh: enriched.orHigh,
+        orLow: enriched.orLow,
+        vwap: enriched.vwap,
         aboveD1High: enriched.aboveD1High,
         belowD1Low: enriched.belowD1Low,
+        aboveOrHigh: enriched.aboveOrHigh,
+        belowOrLow: enriched.belowOrLow,
+        aboveVwap: enriched.aboveVwap,
+        belowVwap: enriched.belowVwap,
+        growwUrl: enriched.growwUrl,
         history: Object.fromEntries(
           times.map(t => [t, lookupRank(rankMaps.get(t), x)])
         )
@@ -1893,8 +2095,19 @@ function snapshotAtCurrent() {
       todayVolume: enriched.todayVolume,
       volumeRatio: enriched.volumeRatio,
       highVolume: enriched.highVolume,
+      maxBarVol: enriched.maxBarVol,
+      barVolRatio: enriched.barVolRatio,
+      orHigh: enriched.orHigh,
+      orLow: enriched.orLow,
+      vwap: enriched.vwap,
       aboveD1High: enriched.aboveD1High,
       belowD1Low: enriched.belowD1Low,
+      aboveOrHigh: enriched.aboveOrHigh,
+      belowOrLow: enriched.belowOrLow,
+      aboveVwap: enriched.aboveVwap,
+      belowVwap: enriched.belowVwap,
+      growwUrl: enriched.growwUrl,
+      fullName: enriched.fullName,
       isGainer: (enriched.pct ?? 0) > 0,
       isLoser: (enriched.pct ?? 0) < 0
     };
@@ -2323,6 +2536,12 @@ async function route(req, res) {
         await loadD1Levels(appId, accessToken);
       } catch (e) {
         log(`D-1 levels load failed: ${e.message}`, 'warn');
+      }
+
+      try {
+        await loadIntradayMetrics(appId, accessToken);
+      } catch (e) {
+        log(`Intraday OR/VWAP metrics load failed: ${e.message}`, 'warn');
       }
 
       startFyersSocket();
