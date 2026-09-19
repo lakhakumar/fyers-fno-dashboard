@@ -32,7 +32,7 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 .stock-head,.rankchg-head{z-index:7}
 .stock-cell,.rankchg-cell{background:#0c1a2a}
 .stock-cell{font-weight:750}
-.ticker{font-weight:800;letter-spacing:.2px}
+.ticker{font-weight:800;letter-spacing:.2px}.stock-link{color:var(--blue);text-decoration:none}.stock-link:hover{text-decoration:underline;color:#8ec5ff}
 .sector-tag{display:block;margin-top:2px;font:600 9px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.25px;text-transform:uppercase;color:#7890aa}
 .positive{color:var(--green)}.negative{color:var(--red)}.neutral{color:var(--muted)}
 .major-up td{background:rgba(53,208,127,.09)}.major-down td{background:rgba(255,95,109,.09)}
@@ -148,7 +148,9 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
       <div class="scanner-title">Setup scanner</div>
       <div class="scanner-help">
         Combine filters with <b>AND</b>. Live LTP / % / volume update during market hours via FYERS WebSocket.
-        High volume = today volume ≥ <b>1.5 × 10-day average volume</b>. Consolidation = D-1 <b>|high−low|/close ≤ 1.5%</b> <i>and</i> D-1 <b>|close−open|/open ≤ 1.5%</b> (up or down).
+        <b>High volume</b>: any today's 5-min candle ≥ <b>5×</b> typical bar (10d avg daily vol ÷ 75).
+        <b>Consolidation</b>: D-1 |H−L|/close ≤ 1.5% and |C−O|/open ≤ 1.5%.
+        <b>OR</b> = 09:15–09:30 range. <b>VWAP</b> = session VWAP. Names link to Groww charts.
       </div>
       <div class="scan-filters">
         <label class="scan-check"><input type="checkbox" data-scan="gainers"> Gainers</label>
@@ -156,7 +158,11 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
         <label class="scan-check"><input type="checkbox" data-scan="aboveD1"> Above D-1 high</label>
         <label class="scan-check"><input type="checkbox" data-scan="belowD1"> Below D-1 low</label>
         <label class="scan-check"><input type="checkbox" data-scan="consolidation"> D-1 consolidation</label>
-        <label class="scan-check"><input type="checkbox" data-scan="highVolume"> High volume (×1.5 MA)</label>
+        <label class="scan-check"><input type="checkbox" data-scan="highVolume"> High volume (5× bar)</label>
+        <label class="scan-check"><input type="checkbox" data-scan="aboveOr"> Above OR high</label>
+        <label class="scan-check"><input type="checkbox" data-scan="belowOr"> Below OR low</label>
+        <label class="scan-check"><input type="checkbox" data-scan="aboveVwap"> Above VWAP</label>
+        <label class="scan-check"><input type="checkbox" data-scan="belowVwap"> Below VWAP</label>
       </div>
       <div class="scan-meta" id="scanMeta">Select filters to narrow the F&amp;O universe. Showing all when none selected (sorted by |%|).</div>
     </div>
@@ -184,10 +190,16 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 const $=s=>document.querySelector(s);
 let creds={appId:sessionStorage.getItem("fyersAppId")||"",accessToken:sessionStorage.getItem("fyersToken")||""};
 let autoRefresh=true, timer=null, activeTab="gainers", lastData=null, socket=null, selectedSector="";
-const scanFilters={gainers:false,losers:false,aboveD1:false,belowD1:false,consolidation:false,highVolume:false};
+const scanFilters={gainers:false,losers:false,aboveD1:false,belowD1:false,consolidation:false,highVolume:false,aboveOr:false,belowOr:false,aboveVwap:false,belowVwap:false};
 
 function headers(){return {"Content-Type":"application/json","x-fyers-app-id":creds.appId,"x-fyers-access-token":creds.accessToken};}
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
+function stockLink(r){
+  const label=esc(r.name);
+  const url=r.growwUrl;
+  if(!url) return `<span class="ticker" title="${esc(r.fullName||r.name)}">${label}</span>`;
+  return `<a class="ticker stock-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(r.fullName||r.name)} on Groww">${label}</a>`;
+}
 function fmt(n,d=2){return Number.isFinite(Number(n))?Number(n).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";}
 function fmtInt(n){return Number.isFinite(Number(n))?Math.round(Number(n)).toLocaleString("en-IN"):"—";}
 function signed(n){return n==null?"—":(n>0?"+":"")+n;}
@@ -284,7 +296,7 @@ function renderTable(type){
     return `<tr class="${rankClass(r.rankDelta,type)}">
       <td class="stock-cell">
         <span class="rank">${idx+1}.</span>
-        <span class="ticker" title="${esc(r.name)}">${esc(r.name)}</span>
+        ${stockLink(r)}
         <span class="sector-tag">${esc(r.sector)}</span>
       </td>
       <td class="rankchg-cell ${deltaClass(r.rankDelta,type)}">${signed(r.rankDelta)}<div class="small">Δ rank</div></td>
@@ -361,6 +373,10 @@ function applyScannerFilters(rows){
   if(f.belowD1) out=out.filter(r=>r.belowD1Low);
   if(f.consolidation) out=out.filter(r=>r.consolidation);
   if(f.highVolume) out=out.filter(r=>r.highVolume);
+  if(f.aboveOr) out=out.filter(r=>r.aboveOrHigh);
+  if(f.belowOr) out=out.filter(r=>r.belowOrLow);
+  if(f.aboveVwap) out=out.filter(r=>r.aboveVwap);
+  if(f.belowVwap) out=out.filter(r=>r.belowVwap);
   return out;
 }
 
@@ -398,9 +414,11 @@ function renderScanner(){
     <th>% Chg</th>
     <th title="Previous day high">D-1 H</th>
     <th title="Previous day low">D-1 L</th>
+    <th title="Opening range high (09:15–09:30)">OR H</th>
+    <th title="Opening range low (09:15–09:30)">OR L</th>
+    <th title="Session VWAP">VWAP</th>
     <th title="|D-1 high − low| / close %">Range%</th>
-    <th title="|D-1 close − open| / open % (up or down)">|Chg|%</th>
-    <th title="Today volume / 10-day avg volume">Vol ×</th>
+    <th title="Max 5m bar vol / typical bar (10d daily MA ÷ 75)">Vol×</th>
   `;
 
   const body=shown.map((r,i)=>{
@@ -410,10 +428,14 @@ function renderScanner(){
     if(r.belowD1Low) badges+=`<span class="badge dnl">↓L</span>`;
     if(r.consolidation) badges+=`<span class="badge coil">Coil</span>`;
     if(r.highVolume) badges+=`<span class="badge vol">Vol</span>`;
+    if(r.aboveOrHigh) badges+=`<span class="badge uph">OR↑</span>`;
+    if(r.belowOrLow) badges+=`<span class="badge dnl">OR↓</span>`;
+    if(r.aboveVwap) badges+=`<span class="badge vol">VWAP↑</span>`;
+    if(r.belowVwap) badges+=`<span class="badge dnl">VWAP↓</span>`;
     return `<tr>
       <td class="stock-cell">
         <span class="rank">${i+1}.</span>
-        <span class="ticker">${esc(r.name)}</span>${badges}
+        ${stockLink(r)}${badges}
         <span class="sector-tag">${esc(r.sector)}</span>
       </td>
       <td class="rank-strong">${r.gainerRank??"—"}</td>
@@ -422,9 +444,11 @@ function renderScanner(){
       <td class="pct-cell ${pctCls}">${r.pct==null?"—":(r.pct>=0?"+":"")+fmt(r.pct)}%</td>
       <td class="${r.aboveD1High?"positive":""}">${fmt(r.d1High)}</td>
       <td class="${r.belowD1Low?"negative":""}">${fmt(r.d1Low)}</td>
+      <td class="${r.aboveOrHigh?"positive":""}">${fmt(r.orHigh)}</td>
+      <td class="${r.belowOrLow?"negative":""}">${fmt(r.orLow)}</td>
+      <td class="${r.aboveVwap?"positive":r.belowVwap?"negative":""}">${fmt(r.vwap)}</td>
       <td>${r.rangePct==null?"—":fmt(r.rangePct,2)}</td>
-      <td>${r.absChangePct==null?"—":fmt(r.absChangePct,2)}</td>
-      <td class="${r.highVolume?"positive":""}">${r.volumeRatio==null?"—":fmt(r.volumeRatio,2)+"×"}</td>
+      <td class="${r.highVolume?"positive":""}">${r.barVolRatio==null?"—":fmt(r.barVolRatio,1)+"×"}</td>
     </tr>`;
   }).join("");
 
