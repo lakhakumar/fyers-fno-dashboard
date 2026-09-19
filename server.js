@@ -510,16 +510,36 @@ function istToday() {
   return istParts().date;
 }
 
+/**
+ * NSE equity cash/F&O regular session is Mon–Fri.
+ * Holidays still need calendar handling; weekends must never be treated as a live session day.
+ */
+function istWeekday() {
+  const wd = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short'
+  }).format(new Date());
+  return wd !== 'Sat' && wd !== 'Sun';
+}
+
+function isTradingSessionDay() {
+  return istWeekday();
+}
+
 function marketOpenNow() {
+  if (!isTradingSessionDay()) return false;
   const { time } = istParts();
   return time >= '09:15:00' && time < '15:30:00';
 }
 
 function regularSessionStarted() {
+  if (!isTradingSessionDay()) return false;
   return istParts().time >= '09:15:00';
 }
 
 function regularSessionFinished() {
+  // Weekend / non-session: treat as "session finished" so UI shows last completed data
+  if (!isTradingSessionDay()) return true;
   return istParts().time >= '15:30:00';
 }
 
@@ -1366,7 +1386,15 @@ function nifty50BreadthFromLive() {
 async function rebuildHistoryFromFyers(appId, token) {
   const date = istToday();
 
-  if (!regularSessionStarted()) {
+  /*
+   * Weekends / before open: never rebuild "today" — show last completed session.
+   */
+  if (!isTradingSessionDay() || !regularSessionStarted()) {
+    log(
+      !isTradingSessionDay()
+        ? `Non-trading day (${date}): loading last completed session instead of rebuilding today.`
+        : `Pre-open (${date}): loading last completed session.`
+    );
     await loadLatestCompletedSession(appId, token);
     return;
   }
@@ -1514,6 +1542,12 @@ async function rebuildHistoryFromFyers(appId, token) {
   );
   if (sortedTimes.length) {
     log(`Historical timeline available: ${sortedTimes.join(', ')}`);
+  } else {
+    log(
+      `No 5-minute candles for ${date} (holiday or empty session). Falling back to last completed session.`,
+      'warn'
+    );
+    await loadLatestCompletedSession(appId, token);
   }
 }
 
@@ -1759,12 +1793,23 @@ function snapshotAtCurrent() {
    * After close: prefer last stored 5-min snapshot so historical columns align.
    * During session with no live quotes yet: fall back to last snapshot.
    */
-  if (state.displayMode === 'previous-close') {
+  if (
+    state.displayMode === 'previous-close' ||
+    !isTradingSessionDay()
+  ) {
     useHistorySnapshot();
   } else if (regularSessionFinished() && state.history.size) {
     useHistorySnapshot();
   } else if (!live.gainers.length && state.history.size) {
     useHistorySnapshot();
+  }
+
+  // Last resort: live quotes alone (e.g. weekend seed before history loads)
+  if (
+    (!displayLive.gainers || !displayLive.gainers.length) &&
+    live.gainers.length
+  ) {
+    displayLive = live;
   }
 
   const g = mergeRows('gainers', displayLive.gainers);
@@ -1845,6 +1890,7 @@ function snapshotAtCurrent() {
 
 async function ensureFinalCloseSnapshot() {
   if (!state.fyers.appId || state.displayMode !== 'current') return;
+  if (!isTradingSessionDay()) return;
   if (!regularSessionFinished()) return;
 
   const date = istToday();
@@ -1892,7 +1938,7 @@ async function ensureFinalCloseSnapshot() {
 --------------------------------------------------------- */
 
 async function makeCandleSnapshot() {
-  if (!state.fyers.appId || state.displayMode !== 'current') {
+  if (!state.fyers.appId || state.displayMode !== 'current' || !isTradingSessionDay()) {
     return;
   }
 
@@ -2060,7 +2106,10 @@ async function dashboardData() {
   let displayDate = state.displayDate || istToday();
   let displayLabel = 'Current trading session';
 
-  if (preOpen) {
+  if (!isTradingSessionDay()) {
+    mode = 'previous-close';
+    displayLabel = 'Market closed (weekend/holiday) • last completed session';
+  } else if (preOpen) {
     mode = 'previous-close';
     displayLabel = 'Last completed trading session (pre-open)';
   } else if (postClose) {
