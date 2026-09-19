@@ -17,7 +17,9 @@ button,input{font:inherit}button{cursor:pointer}.shell{max-width:1800px;margin:a
 .index-name{color:var(--muted);font-size:11px}.index-value{font-size:18px;font-weight:800;margin:2px 0}.up{color:var(--green)}.down{color:var(--red)}
 .breadth-row{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin-top:4px}
 .breadth-row span b{font-variant-numeric:tabular-nums}
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:8px}.tab{background:transparent;border:0;color:var(--muted);padding:10px 16px;border-bottom:2px solid transparent}.tab.active{color:#fff;border-bottom-color:var(--blue);font-weight:700}
+.nifty-ad{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;margin-top:4px}
+.nifty-ad span b{font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:8px;flex-wrap:wrap}.tab{background:transparent;border:0;color:var(--muted);padding:10px 16px;border-bottom:2px solid transparent}.tab.active{color:#fff;border-bottom-color:var(--blue);font-weight:700}
 .toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:7px 0;color:var(--muted);flex-wrap:wrap}.legend{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}.green-s{background:rgba(53,208,127,.55)}.red-s{background:rgba(255,95,109,.55)}.gray-s{background:rgba(143,164,188,.25)}
 .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px;max-height:66vh;background:#091524;box-shadow:var(--shadow)}
 table{border-collapse:separate;border-spacing:0;min-width:max-content;width:100%}
@@ -48,7 +50,6 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 .bar-label{font-size:11px;color:#b9cbe0;overflow:hidden;text-overflow:ellipsis}
 .bar-track{height:18px;background:#13263b;border-radius:4px;overflow:hidden}
 .bar{height:100%;min-width:1px}.bar.pos{background:rgba(53,208,127,.75)}.bar.neg{background:rgba(255,95,109,.75);margin-left:auto}
-.bar-value{text-align:right;font-variant-numeric:tabular-nums}
 .footer{margin-top:10px}
 .log{height:145px;overflow:auto;background:#050b13;border:1px solid var(--line);border-radius:9px;padding:8px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .logline{color:#8ea5bd}.logline.error{color:#ff8b96}.logline.warn{color:#f7c65d}.logline.info{color:#9fc5ee}
@@ -64,6 +65,21 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 .stock-item{display:flex;justify-content:space-between;border-bottom:1px solid #172a40;padding:5px 2px;font-size:11px;gap:8px}
 .hidden{display:none!important}
 .empty-hist{padding:16px;color:var(--muted);font-size:12px;text-align:center}
+/* Scanner */
+.scanner-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:8px}
+.scanner-title{font-weight:800;margin-bottom:6px}
+.scanner-help{font-size:11px;color:var(--muted);margin-bottom:10px}
+.scan-filters{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+.scan-check{display:flex;align-items:center;gap:6px;font-size:12px;color:#c5d4e8;cursor:pointer;user-select:none;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#0b1727}
+.scan-check:hover{border-color:#3c628d}
+.scan-check input{accent-color:#56a8ff}
+.scan-check.on{border-color:#3c7eb5;background:#152a42;color:#fff}
+.scan-meta{font-size:11px;color:var(--muted);margin-top:8px}
+.badge{display:inline-block;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:4px;vertical-align:middle}
+.badge.uph{background:rgba(53,208,127,.2);color:var(--green)}
+.badge.dnl{background:rgba(255,95,109,.2);color:var(--red)}
+.badge.coil{background:rgba(247,198,93,.15);color:var(--amber)}
+.badge.vol{background:rgba(86,168,255,.2);color:var(--blue)}
 @media(max-width:900px){
   .indices{grid-template-columns:1fr 1fr}
   .indices .index-card:last-child{grid-column:1/-1}
@@ -85,7 +101,6 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
   .brand{font-size:15px}
   .table-wrap{max-height:58vh}
   .sector-tag{font-size:8px}
-  .full-name{display:none}
 }
 </style>
 </head>
@@ -110,6 +125,7 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
     <button class="tab active" data-tab="gainers">Gainers</button>
     <button class="tab" data-tab="losers">Losers</button>
     <button class="tab" data-tab="sector">Sector Trends</button>
+    <button class="tab" data-tab="scanner">Scanner</button>
   </div>
 
   <div id="rankPanel">
@@ -126,6 +142,26 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 
   <div id="sectorPanel" class="sectors hidden"></div>
   <div id="sectorDetail" class="sector-detail hidden"></div>
+
+  <div id="scannerPanel" class="hidden">
+    <div class="scanner-panel">
+      <div class="scanner-title">Setup scanner</div>
+      <div class="scanner-help">
+        Combine filters with <b>AND</b>. Live LTP / % / volume update during market hours via FYERS WebSocket.
+        High volume = today volume ≥ <b>1.5 × 10-day average volume</b>. Consolidation = D-1 <b>|high−low|/close ≤ 1.5%</b> <i>and</i> D-1 <b>|close−open|/open ≤ 1.5%</b> (up or down).
+      </div>
+      <div class="scan-filters">
+        <label class="scan-check"><input type="checkbox" data-scan="gainers"> Gainers</label>
+        <label class="scan-check"><input type="checkbox" data-scan="losers"> Losers</label>
+        <label class="scan-check"><input type="checkbox" data-scan="aboveD1"> Above D-1 high</label>
+        <label class="scan-check"><input type="checkbox" data-scan="belowD1"> Below D-1 low</label>
+        <label class="scan-check"><input type="checkbox" data-scan="consolidation"> D-1 consolidation</label>
+        <label class="scan-check"><input type="checkbox" data-scan="highVolume"> High volume (×1.5 MA)</label>
+      </div>
+      <div class="scan-meta" id="scanMeta">Select filters to narrow the F&amp;O universe. Showing all when none selected (sorted by |%|).</div>
+    </div>
+    <div id="scannerWrap" class="table-wrap"></div>
+  </div>
 
   <div class="footer">
     <div class="toolbar"><b>API / system log</b><span id="lastUpdated">Not connected</span></div>
@@ -148,10 +184,12 @@ th:first-child,td:first-child{position:sticky;left:0;z-index:4}
 const $=s=>document.querySelector(s);
 let creds={appId:sessionStorage.getItem("fyersAppId")||"",accessToken:sessionStorage.getItem("fyersToken")||""};
 let autoRefresh=true, timer=null, activeTab="gainers", lastData=null, socket=null, selectedSector="";
+const scanFilters={gainers:false,losers:false,aboveD1:false,belowD1:false,consolidation:false,highVolume:false};
 
 function headers(){return {"Content-Type":"application/json","x-fyers-app-id":creds.appId,"x-fyers-access-token":creds.accessToken};}
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
 function fmt(n,d=2){return Number.isFinite(Number(n))?Number(n).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";}
+function fmtInt(n){return Number.isFinite(Number(n))?Math.round(Number(n)).toLocaleString("en-IN"):"—";}
 function signed(n){return n==null?"—":(n>0?"+":"")+n;}
 function logLocal(msg,level="info"){
   const box=$("#log"),el=document.createElement("div");
@@ -187,10 +225,21 @@ function renderIndices(data){
   const b=data.breadth||{advances:0,declines:0,unchanged:0};
   const cards=(data.indices||[]).map(x=>{
     const cls=(x.changePct??0)>=0?"up":"down";
+    let extra="";
+    if(x.name==="NIFTY 50" && x.nifty50Breadth){
+      const n=x.nifty50Breadth;
+      extra=`<div class="nifty-ad">
+        <span class="up">Adv <b>${n.advances??0}</b></span>
+        <span class="down">Dec <b>${n.declines??0}</b></span>
+        <span class="neutral">Unch <b>${n.unchanged??0}</b></span>
+        <span class="neutral" title="Nifty 50 names matched in F&O live feed">${n.matched??0}/${n.total??50}</span>
+      </div>`;
+    }
     return `<div class="index-card">
       <div class="index-name">${esc(x.name)}</div>
       <div class="index-value">${fmt(x.ltp)}</div>
       <div class="${cls}">${x.changePct==null?"—":(x.changePct>=0?"+":"")+fmt(x.changePct)}%</div>
+      ${extra}
     </div>`;
   }).join("");
   const breadthCard=`<div class="index-card">
@@ -216,11 +265,6 @@ function renderTable(type){
   if(!rows.length){
     $("#tableWrap").innerHTML=`<div class="empty-hist">No ${type} data yet. Waiting for market data or historical rebuild…</div>`;
     return;
-  }
-
-  const histTimes=times.filter(t=>t!=="CURRENT");
-  if(!histTimes.length){
-    // still show table with CURRENT only, plus note
   }
 
   const heads=`
@@ -250,10 +294,10 @@ function renderTable(type){
     </tr>`;
   }).join("");
 
-  let note="";
-  if(!histTimes.length){
-    note=`<div class="empty-hist">Historical 5-min ranks not available yet for this session. Baseline is 09:20 IST once the first snapshot is stored.</div>`;
-  }
+  const histTimes=times.filter(t=>t!=="CURRENT");
+  const note=!histTimes.length
+    ?`<div class="empty-hist">Historical 5-min ranks not available yet for this session. Baseline is 09:20 IST once the first snapshot is stored.</div>`
+    :"";
 
   $("#tableWrap").innerHTML=note+`<table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -307,6 +351,86 @@ function showSector(name){
   detail.scrollIntoView({behavior:"smooth",block:"nearest"});
 }
 
+function applyScannerFilters(rows){
+  let out=rows.slice();
+  const f=scanFilters;
+  // Gainers / losers: if both on, ignore side filter; if one on, apply
+  if(f.gainers && !f.losers) out=out.filter(r=>r.isGainer || (r.pct??0)>0);
+  if(f.losers && !f.gainers) out=out.filter(r=>r.isLoser || (r.pct??0)<0);
+  if(f.aboveD1) out=out.filter(r=>r.aboveD1High);
+  if(f.belowD1) out=out.filter(r=>r.belowD1Low);
+  if(f.consolidation) out=out.filter(r=>r.consolidation);
+  if(f.highVolume) out=out.filter(r=>r.highVolume);
+  return out;
+}
+
+function renderScanner(){
+  if(!lastData)return;
+  const all=lastData.scanner||[];
+  let rows=applyScannerFilters(all);
+  // Sort: by |pct| desc when no side preference, else by pct direction
+  if(scanFilters.losers && !scanFilters.gainers){
+    rows.sort((a,b)=>(a.pct??0)-(b.pct??0));
+  }else if(scanFilters.gainers && !scanFilters.losers){
+    rows.sort((a,b)=>(b.pct??0)-(a.pct??0));
+  }else{
+    rows.sort((a,b)=>Math.abs(b.pct??0)-Math.abs(a.pct??0));
+  }
+
+  const active=[...Object.entries(scanFilters)].filter(([,v])=>v).map(([k])=>k);
+  $("#scanMeta").textContent=active.length
+    ?`Filters: ${active.join(" + ")} • ${rows.length} of ${all.length} F&O stocks`
+    :`No filters • showing ${Math.min(rows.length,80)} of ${all.length} (sorted by |% change|)`;
+
+  // Cap display for readability
+  const shown=rows.slice(0,80);
+
+  if(!shown.length){
+    $("#scannerWrap").innerHTML=`<div class="empty-hist">No stocks match the selected filters. Try fewer filters or wait for live data / D-1 levels to load.</div>`;
+    return;
+  }
+
+  const heads=`
+    <th class="stock-head">Stock</th>
+    <th title="Current rank among F&O gainers (1 = strongest)">G Rank</th>
+    <th title="Current rank among F&O losers (1 = weakest)">L Rank</th>
+    <th>LTP</th>
+    <th>% Chg</th>
+    <th title="Previous day high">D-1 H</th>
+    <th title="Previous day low">D-1 L</th>
+    <th title="|D-1 high − low| / close %">Range%</th>
+    <th title="|D-1 close − open| / open % (up or down)">|Chg|%</th>
+    <th title="Today volume / 10-day avg volume">Vol ×</th>
+  `;
+
+  const body=shown.map((r,i)=>{
+    const pctCls=(r.pct??0)>=0?"positive":"negative";
+    let badges="";
+    if(r.aboveD1High) badges+=`<span class="badge uph">↑H</span>`;
+    if(r.belowD1Low) badges+=`<span class="badge dnl">↓L</span>`;
+    if(r.consolidation) badges+=`<span class="badge coil">Coil</span>`;
+    if(r.highVolume) badges+=`<span class="badge vol">Vol</span>`;
+    return `<tr>
+      <td class="stock-cell">
+        <span class="rank">${i+1}.</span>
+        <span class="ticker">${esc(r.name)}</span>${badges}
+        <span class="sector-tag">${esc(r.sector)}</span>
+      </td>
+      <td class="rank-strong">${r.gainerRank??"—"}</td>
+      <td>${r.loserRank??"—"}</td>
+      <td class="ltp-cell">${fmt(r.ltp)}</td>
+      <td class="pct-cell ${pctCls}">${r.pct==null?"—":(r.pct>=0?"+":"")+fmt(r.pct)}%</td>
+      <td class="${r.aboveD1High?"positive":""}">${fmt(r.d1High)}</td>
+      <td class="${r.belowD1Low?"negative":""}">${fmt(r.d1Low)}</td>
+      <td>${r.rangePct==null?"—":fmt(r.rangePct,2)}</td>
+      <td>${r.absChangePct==null?"—":fmt(r.absChangePct,2)}</td>
+      <td class="${r.highVolume?"positive":""}">${r.volumeRatio==null?"—":fmt(r.volumeRatio,2)+"×"}</td>
+    </tr>`;
+  }).join("");
+
+  $("#scannerWrap").innerHTML=`<table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 function renderLogs(data){
   const arr=data.logs||[];
   $("#log").innerHTML="";
@@ -319,11 +443,15 @@ function renderLogs(data){
 function render(){
   if(!lastData)return;
   renderIndices(lastData);
-  if(activeTab==="sector")renderSectors();
+  const isSector=activeTab==="sector";
+  const isScanner=activeTab==="scanner";
+  $("#rankPanel").classList.toggle("hidden", isSector||isScanner);
+  $("#sectorPanel").classList.toggle("hidden", !isSector);
+  $("#scannerPanel").classList.toggle("hidden", !isScanner);
+  if(!isSector)$("#sectorDetail").classList.add("hidden");
+  if(isSector) renderSectors();
+  else if(isScanner) renderScanner();
   else renderTable(activeTab);
-  $("#rankPanel").classList.toggle("hidden",activeTab==="sector");
-  $("#sectorPanel").classList.toggle("hidden",activeTab!=="sector");
-  if(activeTab!=="sector")$("#sectorDetail").classList.add("hidden");
 }
 
 async function load(){
@@ -375,6 +503,15 @@ document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
   b.classList.add("active");
   activeTab=b.dataset.tab;
   render();
+});
+
+document.querySelectorAll("input[data-scan]").forEach(inp=>{
+  inp.addEventListener("change",()=>{
+    const key=inp.dataset.scan;
+    scanFilters[key]=!!inp.checked;
+    inp.closest(".scan-check").classList.toggle("on", inp.checked);
+    if(activeTab==="scanner") renderScanner();
+  });
 });
 
 $("#loginForm").onsubmit=async e=>{
