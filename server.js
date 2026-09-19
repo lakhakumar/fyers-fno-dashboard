@@ -19,6 +19,26 @@ const INDEX_SYMBOLS = [
 ];
 
 /*
+ * Nifty 50 equity constituents (NSE tickers).
+ * Used only for advance/decline counts inside the NIFTY 50 card.
+ * Keep reasonably current; missing names simply reduce the matched count.
+ */
+const NIFTY50_TICKERS = [
+  'ADANIENT', 'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK',
+  'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL',
+  'BPCL', 'BRITANNIA', 'CIPLA', 'COALINDIA', 'DRREDDY',
+  'EICHERMOT', 'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE',
+  'HEROMOTOCO', 'HINDALCO', 'HINDUNILVR', 'ICICIBANK', 'INDUSINDBK',
+  'INFY', 'ITC', 'JIOFIN', 'JSWSTEEL', 'KOTAKBANK',
+  'LT', 'M&M', 'MARUTI', 'MAXHEALTH', 'NESTLEIND',
+  'NTPC', 'ONGC', 'POWERGRID', 'RELIANCE', 'SBILIFE',
+  'SBIN', 'SHRIRAMFIN', 'SUNPHARMA', 'TCS', 'TATACONSUM',
+  'TATAMOTORS', 'TATASTEEL', 'TECHM', 'TITAN', 'TRENT',
+  'ULTRACEMCO', 'WIPRO'
+];
+const NIFTY50_SET = new Set(NIFTY50_TICKERS);
+
+/*
  * Sector classification for F&O equities.
  * Kept server-side so gainers, losers and sector drill-down share the same map.
  */
@@ -425,6 +445,8 @@ const state = {
   displayMode: 'current',
   live: new Map(),
   indices: new Map(),
+  /** symbol -> { high, low, close, date } previous trading day OHLC */
+  d1Levels: new Map(),
   membership: {
     gainers: [],
     losers: []
@@ -1124,6 +1146,220 @@ function pct(close, prev) {
 }
 
 /* ---------------------------------------------------------
+   PREVIOUS DAY (D-1) HIGH / LOW
+--------------------------------------------------------- */
+
+async function loadD1Levels(appId, token) {
+  const universe = await ensureUniverse();
+  const today = istToday();
+  const VOL_MA_DAYS = 10;
+  let ok = 0;
+  let fail = 0;
+
+  for (let i = 0; i < universe.length; i += 6) {
+    const batch = universe.slice(i, i + 6);
+    const result = await Promise.all(
+      batch.map(async stock => {
+        try {
+          const from = epochForISTDate(today, '09:15') - 25 * 86400;
+          const to = epochForISTDate(today, '15:40');
+          const d = await fyersGet(
+            DATA_HOST,
+            '/history',
+            {
+              symbol: stock.symbol,
+              resolution: 'D',
+              date_format: '0',
+              range_from: from,
+              range_to: to,
+              cont_flag: '1'
+            },
+            appId,
+            token
+          );
+          const cs = d.candles || [];
+          if (!cs.length) return null;
+
+          // Split candles: completed days before today, and optional today bar
+          const prior = [];
+          let todayBar = null;
+          for (const c of cs) {
+            const day = new Date(Number(c[0]) * 1000).toLocaleDateString('en-CA', {
+              timeZone: 'Asia/Kolkata'
+            });
+            const bar = {
+              day,
+              open: Number(c[1]),
+              high: Number(c[2]),
+              low: Number(c[3]),
+              close: Number(c[4]),
+              volume: Number(c[5]) || 0
+            };
+            if (day < today) prior.push(bar);
+            else if (day === today) todayBar = bar;
+          }
+
+          if (!prior.length) return null;
+
+          const d1 = prior[prior.length - 1];
+          const open = d1.open;
+          const high = d1.high;
+          const low = d1.low;
+          const close = d1.close;
+          if (
+            !Number.isFinite(high) ||
+            !Number.isFinite(low) ||
+            !Number.isFinite(close) ||
+            !close ||
+            !Number.isFinite(open) ||
+            !open
+          ) {
+            return null;
+          }
+
+          /*
+           * Consolidation (quiet D-1 session):
+           * - Range uses absolute |high − low| (same whether you think high-low or low-high)
+           * - Net change uses absolute |close − open| so both +ve and −ve days count
+           * Both must be within 1.5%.
+           */
+          const rangePct = (Math.abs(high - low) / close) * 100;
+          const changePct = ((close - open) / open) * 100; // signed (+ up / − down)
+          const absChangePct = Math.abs(changePct);
+          const consolidation = rangePct <= 1.5 && absChangePct <= 1.5;
+
+          // Volume MA of last VOL_MA_DAYS completed sessions (exclude today)
+          const volWindow = prior.slice(-VOL_MA_DAYS);
+          const volSum = volWindow.reduce((s, b) => s + (b.volume || 0), 0);
+          const avgVolume = volWindow.length ? volSum / volWindow.length : null;
+          const d1Volume = d1.volume || null;
+
+          return {
+            symbol: stock.symbol,
+            key: stock.key,
+            open,
+            high,
+            low,
+            close,
+            date: d1.day,
+            rangePct,
+            changePct,
+            absChangePct,
+            consolidation,
+            d1Volume,
+            avgVolume,
+            volMaDays: volWindow.length,
+            todayVolumeFromDaily: todayBar ? todayBar.volume : null
+          };
+        } catch (e) {
+          return null;
+        }
+      })
+    );
+
+    for (const row of result) {
+      if (!row) {
+        fail++;
+        continue;
+      }
+      state.d1Levels.set(row.symbol, row);
+      ok++;
+    }
+  }
+
+  log(
+    `D-1 levels + volume MA(${VOL_MA_DAYS}) loaded for ${ok}/${universe.length} stocks` +
+      (fail ? ` (${fail} unavailable)` : '') +
+      '.'
+  );
+}
+
+function lookupD1(row) {
+  let d1 = row.symbol ? state.d1Levels.get(row.symbol) : null;
+  if (!d1 && row.key) {
+    for (const v of state.d1Levels.values()) {
+      if (v.key === row.key) {
+        d1 = v;
+        break;
+      }
+    }
+  }
+  return d1 || null;
+}
+
+function attachD1Flags(row) {
+  const d1 = lookupD1(row);
+  const ltp = Number(row.ltp ?? row.close);
+  const d1High = d1 && Number.isFinite(d1.high) ? d1.high : null;
+  const d1Low = d1 && Number.isFinite(d1.low) ? d1.low : null;
+  const d1Close = d1 && Number.isFinite(d1.close) ? d1.close : null;
+  const rangePct = d1 && Number.isFinite(d1.rangePct) ? d1.rangePct : null;
+  const changePct = d1 && Number.isFinite(d1.changePct) ? d1.changePct : null;
+  const absChangePct = d1 && Number.isFinite(d1.absChangePct) ? d1.absChangePct : null;
+  const consolidation = !!(d1 && d1.consolidation);
+  const avgVolume = d1 && Number.isFinite(d1.avgVolume) ? d1.avgVolume : null;
+
+  // Prefer live quote volume (intraday cumulative); fall back to daily today bar
+  const liveVol = Number(row.volume);
+  const todayVolume =
+    Number.isFinite(liveVol) && liveVol > 0
+      ? liveVol
+      : d1 && Number.isFinite(d1.todayVolumeFromDaily)
+        ? d1.todayVolumeFromDaily
+        : null;
+
+  const volumeRatio =
+    avgVolume && todayVolume != null && avgVolume > 0
+      ? todayVolume / avgVolume
+      : null;
+  const highVolume = volumeRatio != null && volumeRatio >= 1.5;
+
+  const aboveD1High =
+    d1High != null && Number.isFinite(ltp) ? ltp > d1High : false;
+  const belowD1Low =
+    d1Low != null && Number.isFinite(ltp) ? ltp < d1Low : false;
+
+  return {
+    ...row,
+    d1High,
+    d1Low,
+    d1Close,
+    d1Date: d1?.date || null,
+    rangePct,
+    changePct,
+    absChangePct,
+    consolidation,
+    avgVolume,
+    todayVolume,
+    volumeRatio,
+    highVolume,
+    aboveD1High,
+    belowD1Low
+  };
+}
+
+function nifty50BreadthFromLive() {
+  let advances = 0;
+  let declines = 0;
+  let unchanged = 0;
+  let matched = 0;
+
+  for (const stock of state.universe) {
+    if (!NIFTY50_SET.has(stock.key)) continue;
+    const q = state.live.get(stock.symbol);
+    if (!q || !Number.isFinite(q.changePct)) continue;
+    matched++;
+    const p = q.changePct;
+    if (p > 0) advances++;
+    else if (p < 0) declines++;
+    else unchanged++;
+  }
+
+  return { advances, declines, unchanged, matched, total: NIFTY50_TICKERS.length };
+}
+
+
+/* ---------------------------------------------------------
    REBUILD HISTORY
 --------------------------------------------------------- */
 
@@ -1323,15 +1559,14 @@ function liveRows() {
   return state.universe
     .map(s => {
       const q = state.live.get(s.symbol);
-      return q
-        ? {
-            ...s,
-            ltp: q.ltp,
-            pct: q.changePct,
-            volume: q.volume || 0,
-            ts: q.ts
-          }
-        : null;
+      if (!q) return null;
+      return attachD1Flags({
+        ...s,
+        ltp: q.ltp,
+        pct: q.changePct,
+        volume: q.volume || 0,
+        ts: q.ts
+      });
     })
     .filter(Boolean);
 }
@@ -1411,15 +1646,33 @@ function mergeRows(type, liveRanked) {
     times: [...times, 'CURRENT'],
     rows: rows.map(x => {
       const baseline = lookupRank(baseMap, x);
+      const enriched = attachD1Flags({
+        ...x,
+        ltp: x.ltp ?? x.close ?? null
+      });
       return {
         key: x.key,
         name: x.name,
         sector: x.sector,
         pct: x.pct,
-        ltp: x.ltp ?? x.close ?? null,
+        ltp: enriched.ltp,
         rank: x.rank,
         rankDelta: baseline != null ? baseline - x.rank : null,
         baselineRank: baseline,
+        d1High: enriched.d1High,
+        d1Low: enriched.d1Low,
+        d1Close: enriched.d1Close,
+        d1Date: enriched.d1Date,
+        rangePct: enriched.rangePct,
+        changePct: enriched.changePct,
+        absChangePct: enriched.absChangePct,
+        consolidation: enriched.consolidation,
+        avgVolume: enriched.avgVolume,
+        todayVolume: enriched.todayVolume,
+        volumeRatio: enriched.volumeRatio,
+        highVolume: enriched.highVolume,
+        aboveD1High: enriched.aboveD1High,
+        belowD1Low: enriched.belowD1Low,
         history: Object.fromEntries(
           times.map(t => [t, lookupRank(rankMaps.get(t), x)])
         )
@@ -1530,13 +1783,56 @@ function snapshotAtCurrent() {
     a === 'CURRENT' ? 1 : b === 'CURRENT' ? -1 : a.localeCompare(b)
   );
 
+  // Full universe rows for Scanner tab (live flags + ranks)
+  const gRank = new Map(displayLive.gainers.map(x => [x.key, x.rank]));
+  const lRank = new Map(displayLive.losers.map(x => [x.key, x.rank]));
+  const scanner = displayLive.gainers.map(x => {
+    const enriched = attachD1Flags({
+      ...x,
+      ltp: x.ltp ?? x.close ?? null,
+      volume: x.volume || 0
+    });
+    return {
+      key: enriched.key,
+      name: enriched.name,
+      sector: enriched.sector,
+      ltp: enriched.ltp,
+      pct: enriched.pct,
+      volume: enriched.todayVolume ?? enriched.volume ?? null,
+      gainerRank: gRank.get(x.key) ?? null,
+      loserRank: lRank.get(x.key) ?? null,
+      rankDelta:
+        (state.history.get('09:20')?.gainers || []).find(y => y.key === x.key)
+          ? (state.history.get('09:20').gainers.find(y => y.key === x.key).rank -
+              (gRank.get(x.key) || 0))
+          : null,
+      d1High: enriched.d1High,
+      d1Low: enriched.d1Low,
+      d1Close: enriched.d1Close,
+      d1Date: enriched.d1Date,
+      rangePct: enriched.rangePct,
+      changePct: enriched.changePct,
+      absChangePct: enriched.absChangePct,
+      consolidation: enriched.consolidation,
+      avgVolume: enriched.avgVolume,
+      todayVolume: enriched.todayVolume,
+      volumeRatio: enriched.volumeRatio,
+      highVolume: enriched.highVolume,
+      aboveD1High: enriched.aboveD1High,
+      belowD1Low: enriched.belowD1Low,
+      isGainer: (enriched.pct ?? 0) > 0,
+      isLoser: (enriched.pct ?? 0) < 0
+    };
+  });
+
   return {
     gainers: g.rows,
     losers: l.rows,
     times,
     currentTime: istParts().time.slice(0, 5),
     sector: sectorData(unique),
-    breadth: breadthFrom(unique)
+    breadth: breadthFrom(unique),
+    scanner
   };
 }
 
@@ -1747,11 +2043,18 @@ async function dashboardData() {
   const postClose = regularSessionFinished();
   const snap = snapshotAtCurrent();
 
-  const indices = INDEX_SYMBOLS.map(([name, symbol]) => ({
-    name,
-    symbol,
-    ...(state.indices.get(symbol) || { ltp: null, changePct: null })
-  }));
+  const n50b = nifty50BreadthFromLive();
+  const indices = INDEX_SYMBOLS.map(([name, symbol]) => {
+    const base = {
+      name,
+      symbol,
+      ...(state.indices.get(symbol) || { ltp: null, changePct: null })
+    };
+    if (name === 'NIFTY 50') {
+      base.nifty50Breadth = n50b;
+    }
+    return base;
+  });
 
   let mode = state.displayMode;
   let displayDate = state.displayDate || istToday();
@@ -1919,6 +2222,13 @@ async function route(req, res) {
         log(`Seeded live quotes for ${q.length} symbols.`);
       } catch (e) {
         log(`Live quote seed failed: ${e.message}`, 'warn');
+      }
+
+      // Previous day high/low for breakout filters (rate-limited)
+      try {
+        await loadD1Levels(appId, accessToken);
+      } catch (e) {
+        log(`D-1 levels load failed: ${e.message}`, 'warn');
       }
 
       startFyersSocket();
