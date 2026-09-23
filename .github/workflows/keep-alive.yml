@@ -1,0 +1,16 @@
+name: Keep Render awake (NSE hours)
+
+on:
+  schedule:
+    # Every 10 minutes, 03:00–10:50 UTC ≈ 08:30–16:20 IST, Mon–Fri
+    - cron: '*/10 3-10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health
+        run: |
+          curl -fsS --max-time 60 \
+            "https://fyers-fno-dashboard.onrender.com/api/health"
