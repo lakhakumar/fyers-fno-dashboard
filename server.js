@@ -984,7 +984,20 @@ async function loadDbHistory(date) {
 }
 
 /** Serialize FYERS full-day history rebuilds (login + session monitor). */
-let historyRebuildPromise = null;
+let historyRebuildPromise = null; historyRebuildStartedAt = 0;
+let historyRebuildStartedAt = 0;
+
+function clearStaleHistoryJob(reason) {
+  if (
+    historyRebuildPromise &&
+    historyRebuildStartedAt &&
+    Date.now() - historyRebuildStartedAt > 25 * 60 * 1000
+  ) {
+    log(`Clearing stale history job (${reason}) after 25 min lock.`, 'warn');
+    historyRebuildPromise = null;
+    historyRebuildStartedAt = 0;
+  }
+}
 
 /**
  * In-memory history is usable if we already have solid snapshot coverage.
@@ -1814,11 +1827,13 @@ async function fillMissingSnapshotsFromFyers(appId, token, date) {
     return;
   }
 
+  clearStaleHistoryJob('gap-fill');
   if (historyRebuildPromise) {
     log('Gap-fill skipped: another history job is already running.');
     return historyRebuildPromise;
   }
 
+  historyRebuildStartedAt = Date.now();
   historyRebuildPromise = (async () => {
     try {
       if (Date.now() < fyersCooldownUntil) {
@@ -1945,7 +1960,8 @@ async function fillMissingSnapshotsFromFyers(appId, token, date) {
         log(`Gap-fill finished for ${iso}.`);
       }
     } finally {
-      historyRebuildPromise = null;
+      historyRebuildPromise = null; historyRebuildStartedAt = 0;
+      historyRebuildStartedAt = 0;
     }
   })();
 
@@ -1953,11 +1969,13 @@ async function fillMissingSnapshotsFromFyers(appId, token, date) {
 }
 
 async function rebuildHistoryFromFyers(appId, token) {
+  clearStaleHistoryJob('rebuild');
   if (historyRebuildPromise) {
     log('History rebuild already running — reusing that job (avoids duplicate FYERS load / 429).');
     return historyRebuildPromise;
   }
 
+  historyRebuildStartedAt = Date.now();
   historyRebuildPromise = (async () => {
   try {
   const date = istToday();
@@ -2168,7 +2186,7 @@ async function rebuildHistoryFromFyers(appId, token) {
     log(`History rebuild error: ${e.message}`, 'error');
     throw e;
   } finally {
-    historyRebuildPromise = null;
+    historyRebuildPromise = null; historyRebuildStartedAt = 0;
   }
   })();
 
@@ -2922,121 +2940,70 @@ async function route(req, res) {
         log(`Post-login DB history: ${e.message}`, 'warn');
       }
 
-      // Full REST history/quotes only when probe succeeded (not when already 429)
-      if (restOk) {
-        try {
-          if (!isTradingSessionDay() || !regularSessionStarted()) {
-            if (!state.history.size) {
-              await loadLatestCompletedSession(appId, accessToken);
-            }
-          } else {
-            await rebuildHistoryFromFyers(appId, accessToken);
-          }
-        } catch (e) {
-          log(`Post-login history setup: ${e.message}`, 'warn');
-        }
-
-        try {
-          const iq = await indexQuotes(appId, accessToken);
-          for (const x of iq) {
-            if (x.symbol) state.indices.set(x.symbol, x);
-          }
-        } catch (e) {
-          log(`Index seed quotes failed: ${e.message}`, 'warn');
-        }
-
-        try {
-          const q = await quotes(
-            state.universe.map(x => x.symbol),
-            appId,
-            accessToken
-          );
-          for (const row of q) {
-            if (row.symbol) state.live.set(row.symbol, row);
-          }
-          log(`Seeded live quotes for ${q.length} symbols.`);
-          if (!state.history.size) {
-            const live = rankedLive();
-            if (live.gainers.length) {
-              state.history.set('CLOSE', {
-                gainers: live.gainers,
-                losers: live.losers
-              });
-            }
-          }
-        } catch (e) {
-          log(`Live quote seed failed: ${e.message}`, 'warn');
-        }
-
-        setImmediate(() => {
-          (async () => {
-            try {
-              await loadD1Levels(appId, accessToken);
-              broadcastDashboard();
-            } catch (e) {
-              log(`D-1 levels load failed: ${e.message}`, 'warn');
-            }
-            try {
-              await loadIntradayMetrics(appId, accessToken);
-              broadcastDashboard();
-              log('Scanner metrics (D-1 / OR / VWAP) ready.');
-            } catch (e) {
-              log(`Intraday metrics load failed: ${e.message}`, 'warn');
-            }
-          })();
-        });
-      } else {
-        log(
-          'Login probe was rate-limited — showing DB/live ranks now. ' +
-            'Historical 5-min table will build in the background after cooldown.'
-        );
-        // Build full day rank history once FYERS allows REST again
-        const deferMs = Math.max(90000, (fyersCooldownUntil - Date.now()) + 15000);
-        log(
-          `Scheduled historical rank rebuild/gap-fill in ~${Math.round(deferMs / 1000)}s.`
-        );
-        setTimeout(() => {
-          (async () => {
-            if (!state.fyers.appId) return;
-            if (Date.now() < fyersCooldownUntil) {
-              await sleep(Math.max(0, fyersCooldownUntil - Date.now()) + 5000);
-            }
-            if (!state.fyers.appId) return;
-            try {
-              const day = istToday();
-              await loadDbHistory(day);
-              const gaps = typeof missingRankTimes === 'function' ? missingRankTimes(day) : [];
-              if (gaps.length) {
-                log(
-                  `Background: gap-fill ${gaps.length} missing 5-min rank times for ${day}…`
-                );
-                await fillMissingSnapshotsFromFyers(
+      /*
+       * Never await FYERS history on the login HTTP request — a stuck gap-fill
+       * (or "job already running") was hanging login until the browser timed out.
+       * DB ranks + WebSocket first; history/quotes/scanner always in background.
+       */
+      clearStaleHistoryJob('login');
+      setImmediate(() => {
+        (async () => {
+          if (!state.fyers.appId) return;
+          try {
+            if (!isTradingSessionDay() || !regularSessionStarted()) {
+              if (!state.history.size) {
+                await loadLatestCompletedSession(
                   state.fyers.appId,
-                  state.fyers.token,
-                  day
+                  state.fyers.token
                 );
-              } else if (state.history.size < 5) {
-                log(`Background: full history rebuild for ${day} (sparse timeline)…`);
-                // Allow rebuild even if a single 15:30 row exists
-                state.history.clear();
-                await rebuildHistoryFromFyers(state.fyers.appId, state.fyers.token);
-              } else {
-                log('Background: rank timeline already sufficient — no rebuild.');
               }
-              broadcastDashboard();
-            } catch (e) {
-              log(`Background history build: ${e.message}`, 'warn');
+            } else {
+              await rebuildHistoryFromFyers(
+                state.fyers.appId,
+                state.fyers.token
+              );
             }
-            try {
-              await loadD1Levels(state.fyers.appId, state.fyers.token);
-              await loadIntradayMetrics(state.fyers.appId, state.fyers.token);
-              broadcastDashboard();
-            } catch (e) {
-              log(`Background scanner metrics: ${e.message}`, 'warn');
+          } catch (e) {
+            log(`Background history: ${e.message}`, 'warn');
+          }
+          if (!restOk) {
+            log('Login probe was rate-limited; background history may be slow.');
+          }
+          try {
+            const iq = await indexQuotes(
+              state.fyers.appId,
+              state.fyers.token
+            );
+            for (const x of iq) {
+              if (x.symbol) state.indices.set(x.symbol, x);
             }
-          })();
-        }, deferMs);
-      }
+          } catch (e) {
+            log(`Background index quotes: ${e.message}`, 'warn');
+          }
+          try {
+            const q = await quotes(
+              state.universe.map(x => x.symbol),
+              state.fyers.appId,
+              state.fyers.token
+            );
+            for (const row of q) {
+              if (row.symbol) state.live.set(row.symbol, row);
+            }
+            log(`Background: seeded live quotes for ${q.length} symbols.`);
+            broadcastDashboard();
+          } catch (e) {
+            log(`Background quote seed: ${e.message}`, 'warn');
+          }
+          try {
+            await loadD1Levels(state.fyers.appId, state.fyers.token);
+            await loadIntradayMetrics(state.fyers.appId, state.fyers.token);
+            log('Scanner metrics (D-1 / OR / VWAP) ready.');
+            broadcastDashboard();
+          } catch (e) {
+            log(`Background scanner metrics: ${e.message}`, 'warn');
+          }
+        })();
+      });
 
       try {
         startFyersSocket();
