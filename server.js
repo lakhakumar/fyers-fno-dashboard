@@ -991,9 +991,9 @@ function clearStaleHistoryJob(reason) {
   if (
     historyRebuildPromise &&
     historyRebuildStartedAt &&
-    Date.now() - historyRebuildStartedAt > 25 * 60 * 1000
+    Date.now() - historyRebuildStartedAt > 3 * 60 * 1000
   ) {
-    log(`Clearing stale history job (${reason}) after 25 min lock.`, 'warn');
+    log(`Clearing stale history job (${reason}) after 3 min lock.`, 'warn');
     historyRebuildPromise = null;
     historyRebuildStartedAt = 0;
   }
@@ -1028,27 +1028,144 @@ function historyHasShallowRanks() {
 }
 
 /**
- * Re-fetch FYERS 5m history and rewrite rank_snapshots with full universe ranks.
- * Safe to call after market close / overnight for a past trading_date.
+ * Force full-universe rank depth for a trading date.
+ * Replaces top-50-only snapshots so every stock can show a rank cell.
+ * Does not depend on gap-fill lock from a stuck prior job.
  */
+async function rebuildFullRankDepth(appId, token, date) {
+  const iso = toISODate(date) || date;
+  if (!iso || !appId || !token) return;
+
+  // Break stale lock so deepen cannot be skipped forever
+  historyRebuildPromise = null;
+  historyRebuildStartedAt = 0;
+
+  const universe = await ensureUniverse();
+  log(
+    `Full-depth rank rebuild for ${iso}: ${universe.length} stocks × 5m history (fills blank rank cells)…`
+  );
+
+  // Previous close from quotes (batch) — best effort
+  const previousCloseMap = new Map();
+  try {
+    const quoteRows = await quotes(
+      universe.map(x => x.symbol),
+      appId,
+      token
+    );
+    for (const q of quoteRows) {
+      if (q.symbol && Number.isFinite(q.prev) && q.prev > 0) {
+        previousCloseMap.set(q.symbol, q.prev);
+      }
+    }
+  } catch (e) {
+    log(`Full-depth quotes for prev close: ${e.message}`, 'warn');
+  }
+
+  // Fallback prev from existing 09:20 snapshot pct+close
+  const g920 = state.history.get('09:20')?.gainers || [];
+  for (const row of g920) {
+    if (previousCloseMap.has(row.key)) continue;
+    if (Number.isFinite(row.close) && Number.isFinite(row.pct) && row.pct > -99) {
+      const p = row.pct / 100;
+      const prev = row.close / (1 + p);
+      if (prev > 0) previousCloseMap.set(row.key, prev);
+    }
+  }
+
+  const buckets = new Map(); // time -> array of {key,name,sector,pct,close}
+  let done = 0;
+  let ok = 0;
+
+  for (const stock of universe) {
+    if (!state.fyers.appId) break;
+    if (Date.now() < fyersCooldownUntil) {
+      await sleep(Math.max(0, fyersCooldownUntil - Date.now()) + 2000);
+    }
+    try {
+      const cs = await history5m(stock, appId, token, iso);
+      let prev = previousCloseMap.get(stock.symbol) || previousCloseMap.get(stock.key);
+      if ((!Number.isFinite(prev) || prev <= 0) && cs.length) {
+        prev = Number(cs[0].open);
+      }
+      if (!Number.isFinite(prev) || prev <= 0) {
+        done++;
+        continue;
+      }
+      ok++;
+      for (const c of cs) {
+        const closeEpoch = c.ts + 300;
+        const t = new Date(closeEpoch * 1000).toLocaleTimeString('en-GB', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        if (t < '09:20' || t > '15:30') continue;
+        const pctVal = ((c.close - prev) / prev) * 100;
+        if (!buckets.has(t)) buckets.set(t, []);
+        buckets.get(t).push({
+          key: stock.key,
+          name: stock.name,
+          sector: stock.sector,
+          pct: pctVal,
+          close: c.close
+        });
+      }
+    } catch (e) {
+      if (/429|rate limit/i.test(String(e.message))) {
+        log(`Full-depth rebuild hit 429 at ${done}/${universe.length} — pausing 90s`, 'warn');
+        await sleep(90000);
+      }
+    }
+    done++;
+    if (done % 20 === 0) {
+      log(`Full-depth rebuild progress: ${done}/${universe.length} stocks (${ok} ok)`);
+    }
+  }
+
+  const times = [...buckets.keys()].sort();
+  let saved = 0;
+  for (const t of times) {
+    const arr = buckets.get(t) || [];
+    if (arr.length < 30) continue;
+    const gainers = arr
+      .slice()
+      .sort((a, b) => b.pct - a.pct)
+      .map((x, i) => ({ ...x, rank: i + 1 }));
+    const losers = arr
+      .slice()
+      .sort((a, b) => a.pct - b.pct)
+      .map((x, i) => ({ ...x, rank: i + 1 }));
+    state.history.set(t, { gainers, losers });
+    await saveSnapshot(iso, t, 'gainers', gainers);
+    await saveSnapshot(iso, t, 'losers', losers);
+    saved++;
+  }
+
+  log(
+    `Full-depth rebuild complete for ${iso}: ${saved} times, ` +
+      `09:20 depth=${state.history.get('09:20')?.gainers?.length || 0} (need ~${universe.length}).`
+  );
+  broadcastDashboard();
+}
+
 async function deepenShallowHistoryIfNeeded(appId, token, date) {
   if (!appId || !token) return;
   const iso = toISODate(date) || date;
   if (!iso) return;
   await loadDbHistory(iso);
   if (!state.history.size) {
-    log(`deepen: no snapshots for ${iso}`);
-    return;
-  }
-  if (!historyHasShallowRanks()) {
+    log(`deepen: no snapshots for ${iso} — running full-depth build anyway.`);
+  } else if (!historyHasShallowRanks()) {
     log(`Rank depth OK for ${iso} — historical cells can resolve mid-pack names.`);
     return;
+  } else {
+    log(
+      `Shallow rank depth for ${iso} (top ~50 only). Running full-universe rebuild…`,
+      'warn'
+    );
   }
-  log(
-    `Shallow rank depth for ${iso} (top ~50 only). Gap-filling full-universe ranks so blanks clear…`,
-    'warn'
-  );
-  await fillMissingSnapshotsFromFyers(appId, token, iso);
+  await rebuildFullRankDepth(appId, token, iso);
   await loadDbHistory(iso);
   log(
     `After deepen ${iso}: 09:20 gainers=${state.history.get('09:20')?.gainers?.length || 0}, times=${state.history.size}`
