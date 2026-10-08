@@ -604,10 +604,44 @@ function formatIst(ts) {
   }
 }
 
-/* ---------- FYERS REST API Communication ---------- */
-function fyersHeaders(appId, token) {
+/* ---------- FYERS Authentication & REST API Communication ---------- */
+function getFyersAuth(rawAppId, rawToken) {
+  let appId = String(rawAppId || '').trim();
+  let token = String(rawToken || '').trim().replace(/^(?:bearer)\s+/i, '').trim();
+
+  // If token was pasted as "APPID:TOKEN" (e.g. "XF01234-100:eyJhbGci...")
+  if (token.includes(':')) {
+    const parts = token.split(':');
+    if (parts.length >= 2) {
+      if (!appId || parts[0].includes('-')) {
+        appId = parts[0].trim();
+      }
+      token = parts.slice(1).join(':').trim();
+    }
+  }
+
+  // Ensure FYERS App ID has the required app-type suffix (usually -100)
+  if (appId && !appId.includes('-')) {
+    appId = `${appId}-100`;
+  }
+
+  // Strip any accidental leading appId from token
+  if (appId && token.startsWith(appId + ':')) {
+    token = token.slice(appId.length + 1).trim();
+  }
+
   return {
-    Authorization: `${appId}:${token}`,
+    appId,
+    token,
+    authHeader: `${appId}:${token}`,
+    socketToken: `${appId}:${token}`
+  };
+}
+
+function fyersHeaders(appId, token) {
+  const auth = getFyersAuth(appId, token);
+  return {
+    Authorization: auth.authHeader,
     'Content-Type': 'application/json',
     'User-Agent': 'fyers-fno-dashboard/2.2'
   };
@@ -1061,10 +1095,13 @@ function startFyersSocket() {
     }
   } catch {}
 
-  const auth = `${state.fyers.appId}:${state.fyers.token}`;
+  const auth = getFyersAuth(state.fyers.appId, state.fyers.token);
+  state.fyers.appId = auth.appId;
+  state.fyers.token = auth.token;
+
   let skt;
   try {
-    skt = fyersDataSocket.getInstance(auth, '', false);
+    skt = fyersDataSocket.getInstance(auth.socketToken, '', false);
   } catch (e) {
     wsConnecting = false;
     log(`FYERS socket initialization error: ${e.message}`, 'warn');
@@ -1079,13 +1116,16 @@ function startFyersSocket() {
     state.fyers.connected = true;
     log('FYERS market-data WebSocket CONNECTED.');
 
+    // FYERS has a max limit of 200 symbols per WebSocket connection.
+    // Subscribe to top 195 symbols to stay safely below the limit.
     const symbols = [
-      ...state.universe.map(x => x.symbol),
-      ...INDEX_CONFIG.map(x => x.symbol)
-    ];
+      ...INDEX_CONFIG.map(x => x.symbol),
+      ...state.universe.map(x => x.symbol)
+    ].slice(0, 195);
+
     try {
       for (let i = 0; i < symbols.length; i += 50) {
-        skt.subscribe(symbols.slice(i, i + 50), 'symbolUpdate');
+        skt.subscribe(symbols.slice(i, i + 50));
       }
       log(`Subscribed to ${symbols.length} symbols on FYERS stream.`);
     } catch (e) {
@@ -1113,7 +1153,8 @@ function startFyersSocket() {
   });
 
   skt.on('error', err => {
-    log(`FYERS WebSocket error: ${err.message || err}`, 'warn');
+    const s = typeof err === 'string' ? err : JSON.stringify(err);
+    log(`FYERS WebSocket error: ${s}`, 'warn');
   });
 
   skt.on('close', () => {
@@ -1257,20 +1298,47 @@ function smoothMembership(type, liveRanked) {
 
 function mergeRows(type, liveRanked) {
   const rows = smoothMembership(type, liveRanked);
-  const base = state.history.get('09:20')?.[type] || [];
-  const baseMap = new Map(base.map(x => [normalizeKey(x.key), x.rank]));
+  const baseSnap = state.history.get('09:20') || {};
+  const baseGMap = new Map((baseSnap.gainers || []).map(x => [normalizeKey(x.key), x.rank]));
+  const baseLMap = new Map((baseSnap.losers || []).map(x => [normalizeKey(x.key), x.rank]));
+  const totalUniverse = Math.max(state.universe.length, 212);
+
   const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
   const rankMaps = new Map(
-    times.map(t => [
-      t,
-      new Map((state.history.get(t)?.[type] || []).map(x => [normalizeKey(x.key), x.rank]))
-    ])
+    times.map(t => {
+      const snap = state.history.get(t) || {};
+      const gMap = new Map((snap.gainers || []).map(x => [normalizeKey(x.key), x.rank]));
+      const lMap = new Map((snap.losers || []).map(x => [normalizeKey(x.key), x.rank]));
+      const snapTotal = Math.max(snap.gainers?.length || 0, snap.losers?.length || 0, totalUniverse);
+      return [
+        t,
+        {
+          get: (k) => {
+            if (type === 'gainers') {
+              if (gMap.has(k)) return gMap.get(k);
+              if (lMap.has(k)) return snapTotal - lMap.get(k) + 1;
+            } else {
+              if (lMap.has(k)) return lMap.get(k);
+              if (gMap.has(k)) return snapTotal - gMap.get(k) + 1;
+            }
+            return null;
+          }
+        }
+      ];
+    })
   );
+
   return {
     times: [...times, 'CURRENT'],
     rows: rows.map(x => {
       const k = normalizeKey(x.key);
-      const baseline = baseMap.get(k);
+      let baseline = null;
+      if (type === 'gainers') {
+        baseline = baseGMap.has(k) ? baseGMap.get(k) : (baseLMap.has(k) ? totalUniverse - baseLMap.get(k) + 1 : null);
+      } else {
+        baseline = baseLMap.has(k) ? baseLMap.get(k) : (baseGMap.has(k) ? totalUniverse - baseGMap.get(k) + 1 : null);
+      }
+
       return {
         key: x.key,
         name: x.name,

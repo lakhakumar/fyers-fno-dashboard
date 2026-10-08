@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>FYERS F&O Rank Dashboard + Strategy-1</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -143,8 +146,21 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
 .stock-head, .rankchg-head { z-index: 7; }
 .stock-cell, .rankchg-cell { background: #0b1728; }
 .stock-cell { font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
-.stock-cell a { color: #f0f6fc; text-decoration: none; cursor: pointer; display: block; overflow: hidden; text-overflow: ellipsis; }
-.stock-cell a:hover { color: var(--blue); text-decoration: underline; }
+.stock-cell a,
+#sectorDetail .stock-cell a {
+  color: #ffffff !important;
+  text-decoration: none;
+  cursor: pointer;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+}
+.stock-cell a:hover,
+#sectorDetail .stock-cell a:hover {
+  color: #26e788 !important;
+  text-decoration: underline;
+}
 .sector-tag {
   display: block; margin-top: 1px; font: 600 8.5px/1 'Inter', sans-serif;
   letter-spacing: 0.2px; text-transform: uppercase; color: #6e849f;
@@ -335,7 +351,7 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
         <span id="marketText">CONNECTING…</span>
       </div>
       <button id="refreshBtn" class="btn primary">Live Updates: ON</button>
-      <button id="rebuildBtn" class="btn" style="background:#133926;border-color:#206a44;color:#4ef2a2" title="Force rebuild ranking timeline (09:20–now) from 5-minute candles">🔄 Rebuild Timeline</button>
+      <button id="rebuildBtn" class="btn" style="background:linear-gradient(135deg, #13422a 0%, #1a5c3a 100%);border:1px solid #26e788;color:#ffffff;font-weight:700;box-shadow:0 0 10px rgba(38,231,136,0.25)" title="Force rebuild ranking timeline (09:20–now) from 5-minute candles">🔄 Rebuild Timeline</button>
       <button id="reportBtn" class="btn ok">S1 Report</button>
       <button id="logoutBtn" class="btn danger">Log Out</button>
     </div>
@@ -395,7 +411,7 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
         <button id="vtScan" class="btn">Force Scan</button>
         <button id="vtReport" class="btn ok">Open Report</button>
         <button id="vtTestTelegram" class="btn" style="background:#13334d;border-color:#20527c;color:#7eccff">📱 Test Telegram</button>
-        <button id="vtBacktestDay" class="btn" style="background:#3d240d;border-color:#7a4613;color:#ffb347" title="Simulates Strategy-1 over today's 5m candles. Active after 15:40 IST">⚡ Backtest Day (Post 15:40)</button>
+        <button id="vtBacktestDay" class="btn" style="background:linear-gradient(135deg, #4d2d0b 0%, #70410f 100%);border:1px solid #f59e0b;color:#ffffff;font-weight:700;box-shadow:0 0 10px rgba(245,158,11,0.25)" title="Simulates Strategy-1 over today's 5m candles. Active after 15:40 IST">⚡ Backtest Day (Post 15:40)</button>
       </div>
     </div>
     <div class="vt-grid">
@@ -707,10 +723,10 @@ function openSectorDetail(idx) {
   if (!s) return;
   const body = (s.stocks || []).map(st => `
     <tr>
-      <td class="stock-cell"><a onclick="openChart('${st.key}', ${st.pct})">${esc(st.name)}</a></td>
+      <td class="stock-cell" style="background:#0c1a2d"><a style="color:#ffffff !important;font-weight:700;text-decoration:none;cursor:pointer" onclick="openChart('${st.key}', ${st.pct})">${esc(st.name)}</a></td>
       <td class="${(st.pct || 0) >= 0 ? 'positive' : 'negative'}">${signed(fmt(st.pct))}%</td>
-      <td>₹${fmt(st.ltp)}</td>
-      <td><button class="btn" style="padding:3px 8px;font-size:11px" onclick="openChart('${st.key}', ${st.pct})">Chart</button></td>
+      <td style="color:#f0f6fc">₹${fmt(st.ltp)}</td>
+      <td><button class="btn" style="padding:3px 8px;font-size:11px;background:#1b4f7e;border-color:#3875af;color:#fff" onclick="openChart('${st.key}', ${st.pct})">Chart</button></td>
     </tr>`).join('');
 
   $('#sectorDetail').innerHTML = `
@@ -1236,8 +1252,23 @@ $('#loginForm').onsubmit = async e => {
   $('#loginError').textContent = '';
   $('#loginBtn').disabled = true;
   $('#loginBtn').textContent = 'Validating credentials…';
-  const rawAppId = $('#appId').value.trim();
+  let rawAppId = $('#appId').value.trim();
   let rawToken = $('#accessToken').value.trim().replace(/^(?:bearer)\s+/i, '').trim();
+
+  if (rawToken.includes(':')) {
+    const parts = rawToken.split(':');
+    if (parts.length >= 2) {
+      if (!rawAppId || parts[0].includes('-')) rawAppId = parts[0].trim();
+      rawToken = parts.slice(1).join(':').trim();
+    }
+  }
+  if (rawAppId && !rawAppId.includes('-')) {
+    rawAppId = `${rawAppId}-100`;
+  }
+  if (rawAppId && rawToken.startsWith(rawAppId + ':')) {
+    rawToken = rawToken.slice(rawAppId.length + 1).trim();
+  }
+
   creds = {
     appId: rawAppId,
     accessToken: rawToken
