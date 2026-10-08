@@ -137,7 +137,7 @@ const state = {
   lastQuoteRefreshAt: 0,
   virtual: {
     enabled: true,
-    capital: Number(process.env.VIRTUAL_CAPITAL || 30000),
+    capital: Number(process.env.VIRTUAL_CAPITAL || 300000),
     riskPct: 1,
     maxTrades: 3,
     open: [],
@@ -294,16 +294,16 @@ async function loadVirtualAccountFromDb() {
     if (res.rows.length > 0) {
       const dbBal = Number(res.rows[0].balance);
       if (dbBal > 45000 || !Number.isFinite(dbBal)) {
-        state.virtual.capital = 30000;
-        await saveVirtualAccountToDb(30000);
+        state.virtual.capital = 300000;
+        await saveVirtualAccountToDb(300000);
         log(`Reset virtual account capital to target: ₹30,000`);
       } else {
         state.virtual.capital = dbBal;
         log(`Restored virtual account capital from DB: ₹${state.virtual.capital.toLocaleString('en-IN')}`);
       }
     } else {
-      state.virtual.capital = 30000;
-      await saveVirtualAccountToDb(30000);
+      state.virtual.capital = 300000;
+      await saveVirtualAccountToDb(300000);
     }
   } catch {}
 }
