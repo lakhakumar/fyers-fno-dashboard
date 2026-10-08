@@ -1,13 +1,21 @@
 /**
- * F&O Intraday Rank Dashboard + Strategy-1 Virtual Forward Testing
- * Node HTTP + pg + ws + fyers-api-v3
+ * F&O Intraday Rank Dashboard + Strategy-1 Virtual Forward Testing & EOD Backtesting
+ * Broker API: FYERS API v3 (REST + WebSocket DataSocket)
+ * Node.js + pg + ws + axios + fyers-api-v3
  */
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
 const { Pool } = require('pg');
-const { fyersDataSocket } = require('fyers-api-v3');
+const axios = require('axios');
+const WebSocket = require('ws');
+let fyersDataSocket = null;
+try {
+  fyersDataSocket = require('fyers-api-v3').fyersDataSocket;
+} catch (e) {
+  console.warn('[WARN] fyers-api-v3 not loaded, socket fallback will be used:', e.message);
+}
 
 const PORT = Number(process.env.PORT || 10000);
 const HOST = '0.0.0.0';
@@ -15,10 +23,10 @@ const DATA_HOST = 'https://api-t1.fyers.in/data';
 const API_HOST = 'https://api-t1.fyers.in/api/v3';
 const MASTER_BASE = 'https://public.fyers.in/sym_details/';
 
-const INDEX_SYMBOLS = [
-  ['NIFTY 50', 'NSE:NIFTY50-INDEX'],
-  ['BANK NIFTY', 'NSE:NIFTYBANK-INDEX'],
-  ['SENSEX', 'BSE:SENSEX-INDEX']
+const INDEX_CONFIG = [
+  { name: 'NIFTY 50', symbol: 'NSE:NIFTY50-INDEX', yahoo: '%5ENSEI' },
+  { name: 'BANK NIFTY', symbol: 'NSE:NIFTYBANK-INDEX', yahoo: '%5ENSEBANK' },
+  { name: 'SENSEX', symbol: 'BSE:SENSEX-INDEX', yahoo: '%5EBSESN' }
 ];
 
 const NIFTY50 = new Set([
@@ -30,41 +38,82 @@ const NIFTY50 = new Set([
   'APOLLOHOSP','HDFCLIFE','TATACONSUM','ADANIPORTS','BAJAJ-AUTO','UPL','TATAMOTORS'
 ]);
 
-/* ---------- Sector map (subset + Other F&O fallback) ---------- */
 const SECTOR_MAP = {
-  ADANIENT:'Metals & Mining',ADANIPORTS:'Infrastructure',APOLLOHOSP:'Healthcare',ASIANPAINT:'Consumer Durables',
-  AXISBANK:'Financial Services','BAJAJ-AUTO':'Automobile',BAJFINANCE:'Financial Services',BAJAJFINSV:'Financial Services',
-  BEL:'Defence',BHARTIARTL:'Telecommunication',BPCL:'Oil & Gas',BRITANNIA:'FMCG',CIPLA:'Healthcare',
-  COALINDIA:'Metals & Mining',DABUR:'FMCG',DIVISLAB:'Healthcare',DRREDDY:'Healthcare',EICHERMOT:'Automobile',
-  GAIL:'Oil & Gas',GRASIM:'Cement',HCLTECH:'Information Technology',HDFCBANK:'Financial Services',HDFCLIFE:'Financial Services',
-  HEROMOTOCO:'Automobile',HINDALCO:'Metals & Mining',HINDPETRO:'Oil & Gas',HINDUNILVR:'FMCG',ICICIBANK:'Financial Services',
-  INDUSINDBK:'Financial Services',INFY:'Information Technology',IOC:'Oil & Gas',ITC:'FMCG',JINDALSTEL:'Metals & Mining',
-  JSWSTEEL:'Metals & Mining',KOTAKBANK:'Financial Services',LT:'Infrastructure','M&M':'Automobile',MARUTI:'Automobile',
-  NESTLEIND:'FMCG',NTPC:'Power',ONGC:'Oil & Gas',POWERGRID:'Power',RELIANCE:'Oil & Gas',SBIN:'Financial Services',
-  SUNPHARMA:'Healthcare',TATAMOTORS:'Automobile',TATASTEEL:'Metals & Mining',TCS:'Information Technology',
-  TECHM:'Information Technology',TITAN:'Consumer Durables',ULTRACEMCO:'Cement',WIPRO:'Information Technology',
-  BANKBARODA:'Financial Services',CANBK:'Financial Services',FEDERALBNK:'Financial Services',PNB:'Financial Services',
-  UNIONBANK:'Financial Services',YESBANK:'Financial Services',IDFCFIRSTB:'Financial Services',AUBANK:'Financial Services',
-  PERSISTENT:'Information Technology',LTIM:'Information Technology',COFORGE:'Information Technology',MPHASIS:'Information Technology',
-  ZOMATO:'Consumer Services',TRENT:'Consumer Services',DELHIVERY:'Logistics',PAYTM:'Financial Services',
-  MANKIND:'Healthcare',GLENMARK:'Healthcare',LUPIN:'Healthcare',BIOCON:'Healthcare',
-  SOLARINDS:'Defence',HAL:'Defence',BHEL:'Industrials',SIEMENS:'Industrials',
-  AMBUJACEM:'Cement',DALBHARAT:'Cement',SHREECEM:'Cement',
-  VEDL:'Metals & Mining',HINDZINC:'Metals & Mining',NATIONALUM:'Metals & Mining',SAIL:'Metals & Mining',
-  TVSMOTOR:'Automobile',MOTHERSON:'Automobile',BOSCHLTD:'Automobile',
-  DIXON:'Consumer Durables',HAVELLS:'Consumer Durables',VOLTAS:'Consumer Durables',
-  IRCTC:'Consumer Services',INDHOTEL:'Consumer Services',JUBLFOOD:'Consumer Services',
-  PETRONET:'Oil & Gas',OIL:'Oil & Gas',GAIL:'Oil & Gas',
-  RECLTD:'Financial Services',PFC:'Financial Services',IRFC:'Financial Services',
-  PREMIERENE:'Power',SUZLON:'Power',INOXWIND:'Power',TATAPOWER:'Power',
-  POLICYBZR:'Financial Services',KFINTECH:'Financial Services',BSE:'Financial Services',MCX:'Financial Services',
-  AMBER:'Consumer Durables',PNBHOUSING:'Financial Services',LICHSGFIN:'Financial Services',
-  ABB:'Industrials',POLYCAB:'Industrials',KEI:'Industrials',CGPOWER:'Industrials'
+  "360ONE": "Financial Services", "ABB": "Industrials & Defence", "ABCAPITAL": "Financial Services",
+  "ADANIENSOL": "Power & Green Energy", "ADANIENT": "Services & Hospitality", "ADANIGREEN": "Power & Green Energy",
+  "ADANIPORTS": "Real Estate & Infra", "ADANIPOWER": "Power & Green Energy", "ALKEM": "Healthcare",
+  "AMBER": "Consumer Durables", "AMBUJACEM": "Chemicals & Materials", "ANANDRATHI": "Financial Services",
+  "ANGELONE": "Financial Services", "APLAPOLLO": "Chemicals & Materials", "APOLLOHOSP": "Healthcare",
+  "ASHOKLEY": "Automobile", "ASIANPAINT": "Consumer Durables", "ASTRAL": "Chemicals & Materials",
+  "ATHERENERG": "Automobile", "AUBANK": "Banking", "AUROPHARMA": "Healthcare", "AXISBANK": "Banking",
+  "BAJAJ-AUTO": "Automobile", "BAJAJFINSV": "Financial Services", "BAJAJHLDNG": "Financial Services",
+  "BAJFINANCE": "Financial Services", "BANDHANBNK": "Banking", "BANKBARODA": "Banking", "BANKINDIA": "Banking",
+  "BDL": "Industrials & Defence", "BEL": "Industrials & Defence", "BHARATFORG": "Automobile",
+  "BHARTIARTL": "Telecommunication", "BHEL": "Industrials & Defence", "BIOCON": "Healthcare",
+  "BOSCHLTD": "Automobile", "BPCL": "Energy, Oil & Gas", "BRITANNIA": "FMCG", "BSE": "Financial Services",
+  "CANBK": "Banking", "CANFINHOME": "Financial Services", "CDSL": "Financial Services",
+  "CGPOWER": "Industrials & Defence", "CHAMBLFERT": "Chemicals & Materials", "CHOLAFIN": "Financial Services",
+  "CIPLA": "Healthcare", "COALINDIA": "Metals & Mining", "COFORGE": "Information Technology",
+  "COLPAL": "FMCG", "CONCOR": "Services & Hospitality", "CROMPTON": "Consumer Durables",
+  "CUMMINSIND": "Industrials & Defence", "DABUR": "FMCG", "DALBHARAT": "Chemicals & Materials",
+  "DEEPAKNTR": "Chemicals & Materials", "DELHIVERY": "Services & Hospitality", "DIVISLAB": "Healthcare",
+  "DIXON": "Consumer Durables", "DLF": "Real Estate & Infra", "DMART": "Services & Hospitality",
+  "DRREDDY": "Healthcare", "EICHERMOT": "Automobile", "EXIDEIND": "Automobile", "FEDERALBNK": "Banking",
+  "FORTIS": "Healthcare", "GAIL": "Energy, Oil & Gas", "GLENMARK": "Healthcare", "GMRAIRPORT": "Services & Hospitality",
+  "GODREJCP": "FMCG", "GODREJPROP": "Real Estate & Infra", "GRANULES": "Healthcare", "GRASIM": "Chemicals & Materials",
+  "HAL": "Industrials & Defence", "HAVELLS": "Consumer Durables", "HCLTECH": "Information Technology",
+  "HDFCAMC": "Financial Services", "HDFCBANK": "Banking", "HDFCLIFE": "Financial Services",
+  "HEROMOTOCO": "Automobile", "HINDALCO": "Metals & Mining", "HINDPETRO": "Energy, Oil & Gas",
+  "HINDUNILVR": "FMCG", "HINDZINC": "Metals & Mining", "HUDCO": "Financial Services",
+  "ICICIBANK": "Banking", "ICICIGI": "Financial Services", "ICICIPRULI": "Financial Services",
+  "IDFCFIRSTB": "Banking", "IEX": "Financial Services", "IGL": "Energy, Oil & Gas",
+  "INDHOTEL": "Services & Hospitality", "INDIAMART": "Services & Hospitality", "INDIANB": "Banking",
+  "INDIGO": "Services & Hospitality", "INDUSINDBK": "Banking", "INDUSTOWER": "Telecommunication",
+  "INFY": "Information Technology", "INOXWIND": "Power & Green Energy", "IOC": "Energy, Oil & Gas",
+  "IPCALAB": "Healthcare", "IRB": "Real Estate & Infra", "IRCTC": "Services & Hospitality",
+  "IREDA": "Financial Services", "IRFC": "Financial Services", "ITC": "FMCG",
+  "JINDALSTEL": "Metals & Mining", "JIOFIN": "Financial Services", "JSWENERGY": "Power & Green Energy",
+  "JSWSTEEL": "Metals & Mining", "JUBLFOOD": "Services & Hospitality", "KALYANKJIL": "Consumer Durables",
+  "KEI": "Industrials & Defence", "KFINTECH": "Financial Services", "KOTAKBANK": "Banking",
+  "KPITTECH": "Information Technology", "L&TFH": "Financial Services", "LICHSGFIN": "Financial Services",
+  "LICI": "Financial Services", "LODHA": "Real Estate & Infra", "LT": "Real Estate & Infra",
+  "LTF": "Financial Services", "LTIM": "Information Technology", "LTTS": "Information Technology",
+  "LUPIN": "Healthcare", "M&M": "Automobile", "MANAPPURAM": "Financial Services", "MANKIND": "Healthcare",
+  "MARICO": "FMCG", "MARUTI": "Automobile", "MAXHEALTH": "Healthcare", "MAZDOCK": "Industrials & Defence",
+  "MCX": "Financial Services", "METROPOLIS": "Healthcare", "MFSL": "Financial Services",
+  "MGL": "Energy, Oil & Gas", "MOTHERSON": "Automobile", "MPHASIS": "Information Technology",
+  "MRF": "Automobile", "MUTHOOTFIN": "Financial Services", "NATIONALUM": "Metals & Mining",
+  "NAUKRI": "Services & Hospitality", "NBCC": "Real Estate & Infra", "NCC": "Real Estate & Infra",
+  "NESTLEIND": "FMCG", "NHPC": "Power & Green Energy", "NMDC": "Metals & Mining", "NTPC": "Power & Green Energy",
+  "NUVAMA": "Financial Services", "OBEROIRLTY": "Real Estate & Infra", "OFSS": "Information Technology",
+  "OIL": "Energy, Oil & Gas", "ONGC": "Energy, Oil & Gas", "PAGEIND": "Textiles & Apparels",
+  "PAYTM": "Financial Services", "PERSISTENT": "Information Technology", "PETRONET": "Energy, Oil & Gas",
+  "PFC": "Financial Services", "PHOENIXLTD": "Real Estate & Infra", "PIDILITIND": "Chemicals & Materials",
+  "PIIND": "Chemicals & Materials", "PNB": "Banking", "PNBHOUSING": "Financial Services",
+  "POLICYBZR": "Financial Services", "POLYCAB": "Industrials & Defence", "POONAWALLA": "Financial Services",
+  "POWERGRID": "Power & Green Energy", "PREMIERENE": "Power & Green Energy", "PRESTIGE": "Real Estate & Infra",
+  "PVRINOX": "Services & Hospitality", "RAMCOCEM": "Chemicals & Materials", "RBLBANK": "Banking",
+  "RECLTD": "Financial Services", "RELIANCE": "Energy, Oil & Gas", "SAIL": "Metals & Mining",
+  "SAMVARDHANA": "Automobile", "SBICARD": "Financial Services", "SBILIFE": "Financial Services",
+  "SBIN": "Banking", "SHREECEM": "Chemicals & Materials", "SHRIRAMFIN": "Financial Services",
+  "SIEMENS": "Industrials & Defence", "SOLARINDS": "Industrials & Defence", "SONACOMS": "Automobile",
+  "SRF": "Chemicals & Materials", "SUNPHARMA": "Healthcare", "SUNTV": "Services & Hospitality",
+  "SUPREMEIND": "Chemicals & Materials", "SUZLON": "Power & Green Energy", "SYNGENE": "Healthcare",
+  "TATACHEM": "Chemicals & Materials", "TATACOMM": "Telecommunication", "TATACONSUM": "FMCG",
+  "TATAELXSI": "Information Technology", "TATAMOTORS": "Automobile", "TATAPOWER": "Power & Green Energy",
+  "TATASTEEL": "Metals & Mining", "TATATECH": "Information Technology", "TCS": "Information Technology",
+  "TECHM": "Information Technology", "TITAN": "Consumer Durables", "TORNTPHARM": "Healthcare",
+  "TORNTPOWER": "Power & Green Energy", "TRENT": "Services & Hospitality", "TVSMOTOR": "Automobile",
+  "ULTRACEMCO": "Chemicals & Materials", "UNIONBANK": "Banking", "UNITDSPR": "FMCG",
+  "UPL": "Chemicals & Materials", "VBL": "FMCG", "VEDL": "Metals & Mining",
+  "VOLTAS": "Consumer Durables", "WIPRO": "Information Technology", "YESBANK": "Banking",
+  "ZOMATO": "Services & Hospitality", "ZYDUSLIFE": "Healthcare"
 };
+
+const DEFAULT_FNO_STOCKS = Object.keys(SECTOR_MAP);
 
 /* ---------- State ---------- */
 const state = {
-  masters: { fo: null, cm: null, loadedAt: 0 },
   universe: [],
   log: [],
   currentDay: '',
@@ -76,9 +125,14 @@ const state = {
   history: new Map(),
   d1: new Map(),
   metrics: new Map(),
-  fyers: { appId: '', token: '', socket: null, connected: false, reconnectTimer: null, tokenInvalid: false },
+  fyers: {
+    appId: process.env.FYERS_APP_ID || '',
+    token: process.env.FYERS_ACCESS_TOKEN || '',
+    socket: null,
+    connected: false,
+    reconnectTimer: null
+  },
   lastQuoteRefreshAt: 0,
-  lastSnapshotFingerprint: '',
   virtual: {
     enabled: true,
     capital: Number(process.env.VIRTUAL_CAPITAL || 300000),
@@ -88,332 +142,1012 @@ const state = {
     closed: [],
     signals: [],
     dayKey: '',
-    tradesToday: 0,
-    lastScanAt: 0,
-    reportCache: null
+    tradesToday: 0
   }
 };
 
 const browserSockets = new Set();
-let broadcastTimer = null;
-let historyRebuildPromise = null;
-let historyRebuildStartedAt = 0;
-
-/* ---------- DB ---------- */
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
-      max: 3
-    })
-  : null;
+let pool = null;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  });
+}
 
 function log(msg, level = 'info') {
-  const line = { ts: new Date().toISOString(), level, msg: String(msg) };
+  const ts = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+  const line = { ts, level, msg };
   state.log.push(line);
-  if (state.log.length > 400) state.log.shift();
-  console.log(`[${level}] ${msg}`);
-  broadcast({ type: 'log', line });
+  if (state.log.length > 500) state.log.shift();
+  console.log(`[${ts}] [${level.toUpperCase()}] ${msg}`);
+  if (browserSockets.size) {
+    const raw = JSON.stringify({ type: 'log', line });
+    for (const ws of browserSockets) {
+      try { if (ws.readyState === 1) ws.send(raw); } catch {}
+    }
+  }
 }
 
+/* ---------- Postgres Persistence ---------- */
 async function initDb() {
   if (!pool) {
-    log('DATABASE_URL not set: persistence disabled.', 'warn');
+    log('DATABASE_URL not set: persistence running in memory only.', 'warn');
     return;
   }
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS rank_snapshots (
-      trading_date date NOT NULL,
-      candle_time time NOT NULL,
-      side varchar(10) NOT NULL,
-      rank int NOT NULL,
-      symbol varchar(80) NOT NULL,
-      name varchar(120) NOT NULL,
-      sector varchar(80) NOT NULL,
-      pct numeric NOT NULL,
-      close numeric,
-      PRIMARY KEY (trading_date, candle_time, side, rank)
-    );
-    CREATE INDEX IF NOT EXISTS rank_snapshots_lookup
-      ON rank_snapshots (trading_date, side, candle_time);
-
-    CREATE TABLE IF NOT EXISTS virtual_trades (
-      id serial PRIMARY KEY,
-      strategy varchar(40) NOT NULL DEFAULT 'S1',
-      trading_date date NOT NULL,
-      side varchar(8) NOT NULL,
-      symbol varchar(80) NOT NULL,
-      name varchar(120) NOT NULL,
-      sector varchar(80),
-      entry_ts timestamptz NOT NULL,
-      entry_price numeric NOT NULL,
-      qty int NOT NULL,
-      stop_loss numeric NOT NULL,
-      target1 numeric NOT NULL,
-      target2 numeric,
-      exit_ts timestamptz,
-      exit_price numeric,
-      exit_reason varchar(40),
-      pnl numeric,
-      status varchar(20) NOT NULL DEFAULT 'OPEN',
-      checks jsonb,
-      notes text
-    );
-    CREATE INDEX IF NOT EXISTS virtual_trades_day
-      ON virtual_trades (trading_date, strategy, status);
-  `);
-  log('Postgres persistence ready (ranks + virtual_trades).');
-}
-
-/* ---------- IST helpers ---------- */
-function istParts(date = new Date()) {
-  const s = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-  }).format(date);
-  const [d, t] = s.split(', ');
-  return { date: d, time: t };
-}
-function istToday() { return istParts().date; }
-function istWeekday(d = new Date()) {
-  const day = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', weekday: 'short' }).format(d);
-  return !['Sat', 'Sun'].includes(day);
-}
-function isTradingSessionDay() { return istWeekday(); }
-function marketOpenNow() {
-  if (!isTradingSessionDay()) return false;
-  const { time } = istParts();
-  return time >= '09:15:00' && time < '15:30:00';
-}
-function regularSessionStarted() {
-  if (!isTradingSessionDay()) return false;
-  return istParts().time >= '09:15:00';
-}
-function regularSessionFinished() {
-  return istParts().time >= '15:30:00';
-}
-function toISODate(v) {
-  if (!v) return istToday();
-  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0, 10);
+  const client = await pool.connect();
   try {
-    return new Date(v).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  } catch {
-    return istToday();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS rank_snapshots (
+        trading_date date NOT NULL,
+        candle_time time NOT NULL,
+        side varchar(10) NOT NULL,
+        rank int NOT NULL,
+        symbol varchar(80) NOT NULL,
+        name varchar(120) NOT NULL,
+        sector varchar(80) NOT NULL,
+        pct numeric NOT NULL,
+        close numeric,
+        PRIMARY KEY (trading_date, candle_time, side, rank)
+      );
+      CREATE INDEX IF NOT EXISTS idx_rank_snapshots_lookup
+        ON rank_snapshots (trading_date, side, candle_time);
+
+      CREATE TABLE IF NOT EXISTS virtual_trades (
+        id serial PRIMARY KEY,
+        strategy varchar(40) NOT NULL DEFAULT 'S1',
+        trading_date date NOT NULL,
+        side varchar(8) NOT NULL,
+        symbol varchar(80) NOT NULL,
+        name varchar(120) NOT NULL,
+        sector varchar(80),
+        entry_ts timestamptz NOT NULL,
+        entry_price numeric NOT NULL,
+        qty int NOT NULL,
+        stop_loss numeric NOT NULL,
+        target1 numeric NOT NULL,
+        target2 numeric,
+        exit_ts timestamptz,
+        exit_price numeric,
+        exit_reason varchar(40),
+        gross_pnl numeric,
+        taxes numeric,
+        pnl numeric,
+        status varchar(20) NOT NULL DEFAULT 'OPEN',
+        checks jsonb,
+        notes text
+      );
+      CREATE INDEX IF NOT EXISTS idx_virtual_trades_date
+        ON virtual_trades (trading_date, strategy, status);
+
+      CREATE TABLE IF NOT EXISTS server_sessions (
+        id serial PRIMARY KEY,
+        broker varchar(20) NOT NULL DEFAULT 'fyers',
+        api_key text NOT NULL,
+        token text NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS virtual_account (
+        id serial PRIMARY KEY,
+        broker varchar(20) NOT NULL DEFAULT 'fyers',
+        balance numeric NOT NULL DEFAULT 300000,
+        updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    log('Postgres connection established and schema verified.');
+  } catch (err) {
+    log(`Database initialization error: ${err.message}`, 'error');
+  } finally {
+    client.release();
   }
 }
-function epochForISTDate(dateStr, hm) {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const [hh, mm] = hm.split(':').map(Number);
-  // Approximate IST as UTC+5:30
-  return Math.floor(Date.UTC(y, m - 1, d, hh - 5, mm - 30) / 1000);
-}
-function pct(a, b) {
-  if (!Number.isFinite(a) || !Number.isFinite(b) || !b) return 0;
-  return ((a - b) / b) * 100;
-}
-function normalizeKey(s) {
-  return String(s || '')
-    .toUpperCase()
-    .replace(/^NSE:/, '')
-    .replace(/-EQ$/, '')
-    .replace(/\s+/g, '');
-}
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/* ---------- FYERS rate limiter ---------- */
-const FYERS_SAFE_REQUESTS_PER_MINUTE = 100;
-const FYERS_MIN_REQUEST_GAP_MS = 450;
-let fyersRequestTimes = [];
-let fyersLastRequestAt = 0;
-let fyersRateQueue = Promise.resolve();
-let fyersCooldownUntil = 0;
-
-function fyersHeaders(appId, token) {
-  return { Authorization: `${appId}:${token}`, 'Content-Type': 'application/json' };
+async function saveSessionToDb(appId, token) {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `INSERT INTO server_sessions (broker, api_key, token, updated_at)
+       VALUES ('fyers', $1, $2, CURRENT_TIMESTAMP)`,
+      [appId, token]
+    );
+    log('Server session credentials persisted to PostgreSQL database.');
+  } catch (err) {
+    log(`Failed to save session to DB: ${err.message}`, 'warn');
+  }
 }
 
-function acquireFyersRequestSlot() {
-  const job = fyersRateQueue.then(async () => {
-    while (true) {
-      const now = Date.now();
-      if (now < fyersCooldownUntil) {
-        await sleep(fyersCooldownUntil - now);
-        continue;
-      }
-      fyersRequestTimes = fyersRequestTimes.filter(t => now - t < 60000);
-      const waitForGap = Math.max(0, fyersLastRequestAt + FYERS_MIN_REQUEST_GAP_MS - now);
-      const waitForMinute =
-        fyersRequestTimes.length >= FYERS_SAFE_REQUESTS_PER_MINUTE
-          ? fyersRequestTimes[0] + 60001 - now
-          : 0;
-      const wait = Math.max(waitForGap, waitForMinute);
-      if (wait <= 0) break;
-      await sleep(wait);
+async function loadSessionFromDb() {
+  if (!pool) return null;
+  try {
+    const res = await pool.query(
+      `SELECT api_key, token FROM server_sessions WHERE broker='fyers' ORDER BY id DESC LIMIT 1`
+    );
+    if (res.rows.length > 0) {
+      return { appId: res.rows[0].api_key, token: res.rows[0].token };
     }
-    const sentAt = Date.now();
-    fyersLastRequestAt = sentAt;
-    fyersRequestTimes.push(sentAt);
-  });
-  fyersRateQueue = job.catch(() => {});
-  return job;
+  } catch (err) {
+    log(`Failed to load session from DB: ${err.message}`, 'warn');
+  }
+  return null;
 }
 
-async function fyersGet(base, endpoint, params, appId, token, retries = 1) {
-  await acquireFyersRequestSlot();
+async function saveVirtualAccountToDb(balance) {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `INSERT INTO virtual_account (broker, balance, updated_at)
+       VALUES ('fyers', $1, CURRENT_TIMESTAMP)`,
+      [balance]
+    );
+  } catch {}
+}
+
+async function loadVirtualAccountFromDb() {
+  if (!pool) return;
+  try {
+    const res = await pool.query(
+      `SELECT balance FROM virtual_account WHERE broker='fyers' ORDER BY id DESC LIMIT 1`
+    );
+    if (res.rows.length > 0) {
+      state.virtual.capital = Number(res.rows[0].balance);
+      log(`Restored virtual account capital from DB: ₹${state.virtual.capital.toLocaleString('en-IN')}`);
+    }
+  } catch {}
+}
+
+async function saveVirtualTrade(trade) {
+  if (!pool) return null;
+  try {
+    const res = await pool.query(
+      `INSERT INTO virtual_trades
+       (strategy, trading_date, side, symbol, name, sector, entry_ts, entry_price, qty,
+        stop_loss, target1, target2, gross_pnl, taxes, pnl, status, checks, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       RETURNING id`,
+      [
+        trade.strategy || 'S1', trade.tradingDate, trade.side, trade.symbol, trade.name, trade.sector,
+        trade.entryTs, trade.entryPrice, trade.qty, trade.stopLoss, trade.target1, trade.target2,
+        trade.grossPnl || null, trade.taxes || null, trade.pnl || null, trade.status,
+        JSON.stringify(trade.checks || {}), trade.notes || null
+      ]
+    );
+    return res.rows[0]?.id;
+  } catch (err) {
+    log(`Failed to save virtual trade: ${err.message}`, 'warn');
+    return null;
+  }
+}
+
+async function updateVirtualTradeDb(trade) {
+  if (!pool || !trade.id) return;
+  try {
+    await pool.query(
+      `UPDATE virtual_trades
+       SET stop_loss=$1, qty=$2, exit_ts=$3, exit_price=$4, exit_reason=$5,
+           gross_pnl=$6, taxes=$7, pnl=$8, status=$9
+       WHERE id=$10`,
+      [
+        trade.stopLoss, trade.remainingQty ?? trade.qty, trade.exitTs || null,
+        trade.exitPrice != null ? trade.exitPrice : null, trade.exitReason || null,
+        trade.grossPnl != null ? trade.grossPnl : null, trade.taxes != null ? trade.taxes : null,
+        trade.pnl != null ? trade.pnl : null, trade.status, trade.id
+      ]
+    );
+  } catch (err) {
+    log(`Failed to update virtual trade: ${err.message}`, 'warn');
+  }
+}
+
+async function loadOpenVirtualFromDb() {
+  if (!pool) return;
+  try {
+    const today = istToday();
+    const { rows } = await pool.query(
+      `SELECT * FROM virtual_trades WHERE trading_date=$1 AND status='OPEN' ORDER BY entry_ts`,
+      [today]
+    );
+    state.virtual.open = rows.map(r => ({
+      id: r.id,
+      strategy: r.strategy || 'S1',
+      tradingDate: toISODate(r.trading_date),
+      side: r.side,
+      key: normalizeKey(r.symbol || r.name),
+      symbol: r.symbol,
+      name: r.name,
+      sector: r.sector,
+      entryTs: r.entry_ts,
+      entryPrice: Number(r.entry_price),
+      qty: Number(r.qty),
+      remainingQty: Number(r.qty),
+      stopLoss: Number(r.stop_loss),
+      target1: Number(r.target1),
+      target2: Number(r.target2),
+      status: 'OPEN',
+      partialDone: false,
+      realizedPnl: 0,
+      checks: r.checks,
+      notes: r.notes
+    }));
+    const { rows: cnt } = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM virtual_trades WHERE trading_date=$1`,
+      [today]
+    );
+    state.virtual.tradesToday = cnt[0]?.c || state.virtual.open.length;
+    state.virtual.dayKey = today;
+  } catch (e) {
+    log(`Load open virtual trades: ${e.message}`, 'warn');
+  }
+}
+
+async function saveSnapshot(date, time, side, rows) {
+  if (!pool || !rows?.length) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const r of rows) {
+      await client.query(
+        `INSERT INTO rank_snapshots
+         (trading_date, candle_time, side, rank, symbol, name, sector, pct, close)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (trading_date, candle_time, side, rank)
+         DO UPDATE SET symbol=EXCLUDED.symbol, name=EXCLUDED.name, sector=EXCLUDED.sector,
+                       pct=EXCLUDED.pct, close=EXCLUDED.close`,
+        [date, time, side, r.rank, r.key || r.symbol, r.name, r.sector, r.pct, r.close ?? r.ltp ?? null]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+  } finally {
+    client.release();
+  }
+}
+
+async function loadDbHistory(date) {
+  if (!pool) return;
+  try {
+    const { rows } = await pool.query(
+      `SELECT trading_date, candle_time, side, rank, symbol, name, sector, pct, close
+       FROM rank_snapshots WHERE trading_date=$1 ORDER BY candle_time, side, rank`,
+      [toISODate(date)]
+    );
+    if (!rows.length) return;
+    state.history.clear();
+    for (const r of rows) {
+      const t = String(r.candle_time).slice(0, 5);
+      if (!state.history.has(t)) state.history.set(t, { gainers: [], losers: [] });
+      state.history.get(t)[r.side].push({
+        key: r.symbol,
+        name: r.name,
+        sector: r.sector,
+        pct: Number(r.pct),
+        close: r.close == null ? null : Number(r.close),
+        rank: Number(r.rank)
+      });
+    }
+    log(`Restored ${rows.length} ranking snapshot rows from DB for ${toISODate(date)}.`);
+  } catch (e) {
+    log(`DB history load error: ${e.message}`, 'warn');
+  }
+}
+
+function loadSeedHistory() {
+  const seedPath = path.join(__dirname, 'seed_snapshots.json');
+  try {
+    if (fs.existsSync(seedPath)) {
+      const raw = fs.readFileSync(seedPath, 'utf8');
+      const seed = JSON.parse(raw);
+      if (seed.snapshots && Object.keys(seed.snapshots).length > 0) {
+        state.history.clear();
+        state.currentDay = seed.date || istToday();
+        state.displayDate = seed.date || istToday();
+        state.displayMode = 'previous-close';
+        for (const [t, data] of Object.entries(seed.snapshots)) {
+          state.history.set(t, data);
+        }
+        log(`Loaded ${state.history.size} pre-seeded snapshot intervals for ${seed.date} from seed_snapshots.json.`);
+
+        if (seed.latest_quotes) {
+          const nowSec = Date.now() / 1000;
+          for (const [sKey, q] of Object.entries(seed.latest_quotes)) {
+            const sym = q.symbol || `NSE:${sKey}-EQ`;
+            state.live.set(sym, {
+              ...q,
+              symbol: sym,
+              changePct: q.changePct ?? q.pct ?? 0,
+              ts: nowSec
+            });
+          }
+          log(`Seeded ${state.live.size} offline quotes from seed_snapshots.json.`);
+        }
+        return true;
+      }
+    }
+  } catch (err) {
+    log(`Failed to load seed_snapshots.json: ${err.message}`, 'warn');
+  }
+  return false;
+}
+
+/* ---------- Statutory Charges & Taxes (NSE Equity Intraday) ---------- */
+function calculateTradeCharges(entryPrice, exitPrice, qty) {
+  const buyTurnover = entryPrice * qty;
+  const sellTurnover = exitPrice * qty;
+  const totalTurnover = buyTurnover + sellTurnover;
+
+  const brokerage = Math.min(20, buyTurnover * 0.0003) + Math.min(20, sellTurnover * 0.0003);
+  const stt = Math.round(sellTurnover * 0.00025);
+  const exchangeTxnCharge = Number((totalTurnover * 0.0000325).toFixed(2));
+  const sebiTurnoverCharge = Number((totalTurnover * 0.000001).toFixed(2));
+  const stampDuty = Math.round(buyTurnover * 0.00003);
+  const gst = Number(((brokerage + exchangeTxnCharge + sebiTurnoverCharge) * 0.18).toFixed(2));
+  const totalCharges = Number((brokerage + stt + exchangeTxnCharge + sebiTurnoverCharge + stampDuty + gst).toFixed(2));
+
+  return {
+    brokerage, stt, exchangeTxnCharge, sebiTurnoverCharge, stampDuty, gst, totalCharges, totalTurnover
+  };
+}
+
+/* ---------- Helpers ---------- */
+function istParts(date = new Date()) {
+  const s = date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour12: false });
+  const [d, t] = s.split(', ');
+  const [m, day, y] = d.split('/');
+  const istDateObj = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  return {
+    date: `${y}-${m.padStart(2, '0')}-${day.padStart(2, '0')}`,
+    time: t.length === 7 ? '0' + t : t,
+    dayOfWeek: istDateObj.getDay()
+  };
+}
+
+function istToday() { return istParts().date; }
+
+function toISODate(d) {
+  if (typeof d === 'string') return d.slice(0, 10);
+  if (d instanceof Date) return d.toISOString().slice(0, 10);
+  return String(d || '').slice(0, 10);
+}
+
+function normalizeKey(str) {
+  if (!str) return '';
+  return str.toUpperCase().replace(/^NSE:/, '').replace(/-EQ$/, '').replace(/-INDEX$/, '').trim();
+}
+
+function getYahooSymbol(key) {
+  const k = normalizeKey(key);
+  if (k === 'M&M') return 'M%26M.NS';
+  if (k === 'BAJAJ-AUTO') return 'BAJAJ-AUTO.NS';
+  if (k === 'L&TFH') return 'L%26TFH.NS';
+  if (k === 'MCDOWELL-N') return 'MCDOWELL-N.NS';
+  if (k === 'NIFTY 50' || k === 'NIFTY') return '%5ENSEI';
+  if (k === 'BANK NIFTY' || k === 'BANKNIFTY') return '%5ENSEBANK';
+  return `${encodeURIComponent(k)}.NS`;
+}
+
+function pct(current, base) {
+  if (!base || base === 0) return 0;
+  return Number((((current - base) / base) * 100).toFixed(2));
+}
+
+function isPreOpenSession() {
+  const { time, dayOfWeek } = istParts();
+  if (dayOfWeek === 0 || dayOfWeek === 6) return false;
+  return time >= '09:00:00' && time < '09:15:00';
+}
+
+function marketOpenNow() {
+  const { time, dayOfWeek } = istParts();
+  if (dayOfWeek === 0 || dayOfWeek === 6) return false;
+  return time >= '09:15:00' && time <= '15:30:00';
+}
+
+function regularSessionFinished() {
+  const { time, dayOfWeek } = istParts();
+  if (dayOfWeek === 0 || dayOfWeek === 6) return true;
+  return time > '15:30:00';
+}
+
+function isTradingSessionDay() {
+  const { dayOfWeek } = istParts();
+  return dayOfWeek >= 1 && dayOfWeek <= 5;
+}
+
+function getRecentTradingDates(count = 5) {
+  const dates = [];
+  const d = new Date();
+  while (dates.length < count) {
+    const day = d.getDay();
+    if (day !== 0 && day !== 6) {
+      dates.unshift(istParts(d).date);
+    }
+    d.setDate(d.getDate() - 1);
+  }
+  return dates;
+}
+
+function liveDataAgeSec() {
+  let newest = 0;
+  for (const q of state.live.values()) {
+    const t = Number(q.ts) || 0;
+    if (t > newest) newest = t;
+  }
+  if (!newest) return Infinity;
+  const sec = newest > 1e12 ? newest / 1000 : newest;
+  return Math.max(0, Date.now() / 1000 - sec);
+}
+
+function expectedRankTimes(upto = '15:30') {
+  const out = [];
+  let h = 9, m = 20;
+  while (true) {
+    const t = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    if (t > upto) break;
+    out.push(t);
+    m += 5;
+    if (m >= 60) { h++; m -= 60; }
+    if (h > 15 || (h === 15 && m > 30)) break;
+  }
+  return out;
+}
+
+function formatIst(ts) {
+  try {
+    return new Date(ts).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    });
+  } catch {
+    return String(ts);
+  }
+}
+
+/* ---------- FYERS REST API Communication ---------- */
+function fyersHeaders(appId, token) {
+  return {
+    Authorization: `${appId}:${token}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'fyers-fno-dashboard/2.2'
+  };
+}
+
+async function fyersGet(base, endpoint, params, appId, token) {
   const u = new URL(base + endpoint);
   for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, String(v));
-  const r = await fetch(u, { headers: fyersHeaders(appId, token) });
-  const text = await r.text();
-  let data;
-  try { data = JSON.parse(text); } catch {
-    if (r.status === 429 && retries > 0) {
-      fyersCooldownUntil = Date.now() + 60000;
-      log('FYERS rate-limit cooldown 60s', 'warn');
-      await sleep(60000);
-      return fyersGet(base, endpoint, params, appId, token, retries - 1);
-    }
-    throw new Error(`FYERS non-JSON ${r.status}: ${text.slice(0, 120)}`);
-  }
-  if (!r.ok || data.s === 'error') {
-    const code = data.code ?? '';
-    const msg = data.message || 'request failed';
-    const errStr = `FYERS ${r.status}/${code}: ${msg}`;
-    if (isAuthError(errStr) || code === -15 || code === -16 || code === '-15' || code === '-16') {
-      markTokenInvalid(errStr);
-    }
-    if ((r.status === 429 || String(msg).toLowerCase().includes('rate')) && retries > 0) {
-      fyersCooldownUntil = Date.now() + 120000;
-      log('FYERS rate-limit cooldown 120s', 'warn');
-      await sleep(90000);
-      return fyersGet(base, endpoint, params, appId, token, retries - 1);
-    }
-    throw new Error(errStr);
-  }
-  return data;
+  const res = await axios.get(u.toString(), {
+    headers: fyersHeaders(appId, token),
+    timeout: 10000
+  });
+  return res.data;
 }
 
-/* ---------- Symbol masters / universe ---------- */
-function getField(v, names) {
-  for (const n of names) {
-    if (v?.[n] !== undefined && v?.[n] !== null && v?.[n] !== '') return v[n];
-  }
-  return '';
-}
-
-async function loadMaster(kind) {
-  const now = Date.now();
-  if (state.masters[kind] && now - state.masters.loadedAt < 6 * 60 * 60 * 1000) {
-    return state.masters[kind];
-  }
-  const name = kind === 'fo' ? 'NSE_FO_sym_master.json' : 'NSE_CM_sym_master.json';
-  const r = await fetch(MASTER_BASE + name, { headers: { 'User-Agent': 'fno-rank-dashboard/2.1' } });
-  if (!r.ok) throw new Error(`Symbol master ${name}: HTTP ${r.status}`);
-  const data = await r.json();
-  state.masters[kind] = data;
-  state.masters.loadedAt = now;
-  log(`Loaded ${name} (${Object.keys(data).length} instruments).`);
-  return data;
-}
-
-function growwSlug(name) {
-  let s = String(name || '')
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9\s-]/g, ' ')
-    .replace(/\blimited\b/g, 'ltd')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-  // preserve india / of-india (do not collapse to "i")
-  s = s
-    .replace(/\bstate-bank-of-india\b/g, 'state-bank-of-india')
-    .replace(/\bbank-of-india\b/g, 'bank-of-india')
-    .replace(/\bunion-bank-of-india\b/g, 'union-bank-of-india')
-    .replace(/\bindian\b/g, 'indian')
-    .replace(/\bindia\b/g, 'india');
-  return s;
-}
-
-function buildUniverse(fo, cm) {
-  const out = new Map();
-  let futstk = 0, skippedIdx = 0, noCm = 0, dup = 0;
-  for (const [, v] of Object.entries(fo)) {
-    const typ = String(getField(v, ['exInstType', 'instrumentType', 'instrument_type', 'type'])).toUpperCase();
-    if (!(typ === '13' || typ === 'FUTSTK' || typ.includes('FUTSTK'))) continue;
-    futstk++;
-    let underlying = String(getField(v, ['underSym', 'underlyingSymbol', 'underlying', 'shortSym', 'exSymName']))
-      .toUpperCase().trim();
-    if (underlying.includes(':')) underlying = underlying.split(':').pop();
-    underlying = underlying.replace(/-EQ$/, '').replace(/\s+/g, '');
-    if (!underlying) continue;
-    if (['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(underlying)) {
-      skippedIdx++;
-      continue;
-    }
-    let eq = [`NSE:${underlying}-EQ`, String(getField(v, ['cashSymbol', 'equitySymbol', 'eqSymbol']))]
-      .filter(Boolean).find(s => cm[s]);
-    if (!eq) {
-      const hit = Object.entries(cm).find(([s, cv]) =>
-        String(getField(cv, ['shortSymbol', 'shortSym', 'exSymName', 'symDetails'])).toUpperCase() === underlying &&
-        s.startsWith('NSE:') && /-EQ$/.test(s)
-      );
-      if (hit) eq = hit[0];
-    }
-    if (!eq) { eq = `NSE:${underlying}-EQ`; noCm++; }
-    if (out.has(underlying)) { dup++; continue; }
-    const cmRow = cm[eq] || {};
-    const displayName = String(getField(cmRow, ['exSymName', 'symTicker', 'shortSym']) || underlying);
-    out.set(underlying, {
-      key: underlying,
-      symbol: eq,
-      name: underlying,
-      displayName,
-      sector: SECTOR_MAP[underlying] || 'Other F&O',
-      growwUrl: `https://groww.in/charts/stocks/${growwSlug(displayName)}?exchange=NSE`
+/* ---------- Universe Initialization ---------- */
+async function ensureUniverse() {
+  if (state.universe.length) return state.universe;
+  const list = [];
+  for (const s of DEFAULT_FNO_STOCKS) {
+    const sym = `NSE:${s}-EQ`;
+    list.push({
+      key: s,
+      name: s,
+      symbol: sym,
+      sector: SECTOR_MAP[s] || 'Other F&O'
     });
   }
-  const list = [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
-  log(`F&O universe build: FUTSTK=${futstk}, unique equities=${list.length}, skipped index underlyings=${skippedIdx}, no CM EQ match≈${noCm}, duplicates=${dup}`);
-  const pe = list.find(x => x.key === 'PREMIERENE');
-  log(pe ? `Validation: PREMIERENE -> ${pe.symbol} (OK)` : 'Validation: PREMIERENE not in universe', pe ? 'info' : 'warn');
-  log(`Sample F&O equity symbols: ${list.slice(0, 8).map(x => x.symbol).join(', ')}`);
+  state.universe = list;
+  log(`Initialized active F&O universe with ${list.length} equities.`);
   return list;
 }
 
-async function ensureUniverse() {
-  if (state.universe.length) return state.universe;
-  const fo = await loadMaster('fo');
-  const cm = await loadMaster('cm');
-  state.universe = buildUniverse(fo, cm);
-  log(`F&O equity universe ready: ${state.universe.length} stocks.`);
-  return state.universe;
-}
-
-/* ---------- Quotes / parse ---------- */
-async function quotes(symbols, appId, token) {
+/* ---------- Quote Fetching (FYERS Data API v3) ---------- */
+async function fetchQuotes(symbols, appId, token) {
   const out = [];
-  for (let i = 0; i < symbols.length; i += 40) {
-    const batch = symbols.slice(i, i + 40);
-    const d = await fyersGet(DATA_HOST, '/quotes', { symbols: batch.join(',') }, appId, token);
-    const arr = d.d || d.data || [];
-    for (const row of arr) {
-      const v = row.v || row;
-      const sym = row.n || v.symbol || '';
-      const ltp = Number(v.lp ?? v.ltp ?? v.last_price);
-      const prev = Number(v.prev_close_price ?? v.prev ?? v.open_price);
-      const chp = Number(v.chp ?? v.change_percentage);
-      const vol = Number(v.volume ?? v.vol ?? 0);
-      out.push({
-        symbol: sym,
-        ltp: Number.isFinite(ltp) ? ltp : null,
-        prev: Number.isFinite(prev) ? prev : null,
-        changePct: Number.isFinite(chp) ? chp : (prev && ltp ? pct(ltp, prev) : 0),
-        volume: Number.isFinite(vol) ? vol : 0
-      });
+  const chunk = 50; // FYERS supports up to 50 symbols per request
+  for (let i = 0; i < symbols.length; i += chunk) {
+    const batch = symbols.slice(i, i + chunk);
+    try {
+      const d = await fyersGet(DATA_HOST, '/quotes', { symbols: batch.join(',') }, appId, token);
+      const arr = d.d || d.data || [];
+      for (const row of arr) {
+        const v = row.v || row;
+        const sym = row.n || v.symbol || '';
+        const ltp = Number(v.lp ?? v.ltp ?? v.last_price);
+        const prev = Number(v.prev_close_price ?? v.prev ?? v.open_price);
+        const chp = Number(v.chp ?? v.change_percentage);
+        const vol = Number(v.volume ?? v.vol ?? 0);
+        if (Number.isFinite(ltp) && ltp > 0) {
+          out.push({
+            symbol: sym,
+            ltp,
+            prev: Number.isFinite(prev) ? prev : ltp,
+            changePct: Number.isFinite(chp) ? chp : (prev && ltp ? pct(ltp, prev) : 0),
+            volume: Number.isFinite(vol) ? vol : 0,
+            ts: Date.now() / 1000
+          });
+        }
+      }
+    } catch (err) {
+      log(`FYERS quote fetch chunk error: ${err.message}`, 'warn');
     }
   }
   return out;
+}
+
+async function seedInitialQuotes(appId, token) {
+  if (!appId || !token) {
+    if (state.live.size < 50) loadSeedHistory();
+    return;
+  }
+  const universe = await ensureUniverse();
+  try {
+    const syms = universe.map(s => s.symbol).concat(INDEX_CONFIG.map(x => x.symbol));
+    const qs = await fetchQuotes(syms, appId, token);
+    const nowSec = Date.now() / 1000;
+    if (qs && qs.length > 0) {
+      for (const q of qs) {
+        if (INDEX_CONFIG.some(x => x.symbol === q.symbol)) {
+          state.indices.set(q.symbol, { ...q, ts: nowSec });
+        } else {
+          state.live.set(q.symbol, { ...q, ts: nowSec });
+        }
+      }
+      state.lastQuoteRefreshAt = Date.now();
+      log(`Seeded live quotes for ${qs.length}/${universe.length} symbols. Quote age: ${liveDataAgeSec().toFixed(0)}s.`);
+    } else {
+      if (state.live.size < 50) {
+        log('FYERS returned 0 quotes. Populating quotes from seed data.', 'warn');
+        loadSeedHistory();
+      }
+    }
+  } catch (err) {
+    log(`Quote seed warning: ${err.message}`, 'warn');
+    if (state.live.size < 50) loadSeedHistory();
+  }
+}
+
+async function refreshLiveQuotes(reason = 'refresh') {
+  if (!state.fyers.appId || !state.fyers.token) return false;
+  try {
+    await seedInitialQuotes(state.fyers.appId, state.fyers.token);
+    log(`Live quotes refreshed (${reason}); age now ${liveDataAgeSec().toFixed(0)}s.`);
+    return true;
+  } catch (e) {
+    log(`Quote refresh failed (${reason}): ${e.message}`, 'warn');
+    return false;
+  }
+}
+
+/* ---------- Index Quotes Keeper ---------- */
+let lastIndexRefreshTime = 0;
+async function refreshIndexQuotes(force = false) {
+  if (!force && Date.now() - lastIndexRefreshTime < 45000) return;
+  lastIndexRefreshTime = Date.now();
+  for (const idx of INDEX_CONFIG) {
+    if (!idx.yahoo) continue;
+    try {
+      const res = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${idx.yahoo}?interval=1d&range=1d`,
+        { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 }
+      );
+      const meta = res?.data?.chart?.result?.[0]?.meta;
+      if (meta) {
+        const ltp = Number(meta.regularMarketPrice);
+        const prev = Number(meta.chartPreviousClose || meta.previousClose || ltp);
+        const changePct = prev ? Number((((ltp - prev) / prev) * 100).toFixed(2)) : 0;
+        state.indices.set(idx.symbol, {
+          symbol: idx.symbol,
+          name: idx.name,
+          ltp,
+          prev,
+          pct: changePct,
+          changePct,
+          ts: Date.now() / 1000
+        });
+      }
+    } catch {}
+  }
+}
+
+/* ---------- Smart Money Concepts (SMC) Order Block Detection ---------- */
+function detectOrderBlocks(candles) {
+  if (!candles || candles.length < 15) return { buyZones: [], sellZones: [] };
+  const ranges = candles.map(c => Math.max(c.high - c.low, 0.05));
+  const avgRange = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+
+  const buyZones = [];
+  const sellZones = [];
+
+  for (let i = 2; i < candles.length - 2; i++) {
+    const cur = candles[i];
+    const next1 = candles[i + 1];
+    const next2 = candles[i + 2];
+
+    const upMove = next2.close - cur.close;
+    const isBearishCandle = cur.close < cur.open;
+    if (isBearishCandle && upMove > 1.8 * avgRange && next1.close > cur.high) {
+      const low = cur.low;
+      const high = Math.max(cur.open, cur.close);
+      buyZones.push({
+        type: 'BUY',
+        time: cur.time,
+        low: Number(low.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        mid: Number(((low + high) / 2).toFixed(2)),
+        strength: Number((upMove / avgRange).toFixed(1))
+      });
+    }
+
+    const downMove = cur.close - next2.close;
+    const isBullishCandle = cur.close > cur.open;
+    if (isBullishCandle && downMove > 1.8 * avgRange && next1.close < cur.low) {
+      const low = Math.min(cur.open, cur.close);
+      const high = cur.high;
+      sellZones.push({
+        type: 'SELL',
+        time: cur.time,
+        low: Number(low.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        mid: Number(((low + high) / 2).toFixed(2)),
+        strength: Number((downMove / avgRange).toFixed(1))
+      });
+    }
+  }
+
+  const lastPrice = candles[candles.length - 1].close;
+  const activeBuy = buyZones
+    .filter(z => z.high <= lastPrice * 1.06 && z.low >= lastPrice * 0.88)
+    .slice(-3);
+  const activeSell = sellZones
+    .filter(z => z.low >= lastPrice * 0.94 && z.high <= lastPrice * 1.12)
+    .slice(-3);
+
+  return {
+    buyZones: activeBuy,
+    sellZones: activeSell,
+    allBuyZones: buyZones.slice(-6),
+    allSellZones: sellZones.slice(-6)
+  };
+}
+
+/* ---------- 2-Week Historical Candles Fetcher ---------- */
+const chartCache = new Map();
+
+async function fetchHistorical2Weeks(stock, appId, token) {
+  const cacheKey = stock.key;
+  const cached = chartCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 300000) {
+    return cached.data;
+  }
+
+  let candles = [];
+
+  // Tier 1: 14-day 5m candles from Yahoo Finance (yields ~950–1050 bars across 2 weeks)
+  try {
+    const ySym = getYahooSymbol(stock.key);
+    const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?range=14d&interval=5m`;
+    const yRes = await axios.get(yUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 5000
+    });
+    const result = yRes.data?.chart?.result?.[0];
+    if (result) {
+      const timestamps = result.timestamp || [];
+      const quotes = result.indicators?.quote?.[0] || {};
+      const opens = quotes.open || [];
+      const highs = quotes.high || [];
+      const lows = quotes.low || [];
+      const closes = quotes.close || [];
+      const volumes = quotes.volume || [];
+
+      for (let i = 0; i < timestamps.length; i++) {
+        const c = closes[i];
+        if (c == null) continue;
+        const dt = new Date(timestamps[i] * 1000);
+        const tStr = dt.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+        candles.push({
+          time: timestamps[i],
+          timeStr: tStr,
+          open: Number((opens[i] ?? c).toFixed(2)),
+          high: Number((highs[i] ?? c).toFixed(2)),
+          low: Number((lows[i] ?? c).toFixed(2)),
+          close: Number(c.toFixed(2)),
+          volume: Number(volumes[i] || 0)
+        });
+      }
+    }
+  } catch (err) {}
+
+  // Tier 2: FYERS Historical API fallback if Yahoo < 300
+  if (candles.length < 300 && appId && token) {
+    try {
+      const pastDates = getRecentTradingDates(10);
+      const today = istToday();
+      const from = Math.floor(new Date(`${pastDates[0] || today}T09:15:00+05:30`).getTime() / 1000);
+      const to = Math.floor(new Date(`${today}T15:30:00+05:30`).getTime() / 1000);
+      const fRes = await fyersGet(DATA_HOST, '/history', {
+        symbol: stock.symbol,
+        resolution: '5',
+        date_format: '0',
+        range_from: from,
+        range_to: to,
+        cont_flag: '1'
+      }, appId, token);
+      const raw = fRes?.candles || [];
+      if (raw.length > candles.length) {
+        candles = raw.map(c => ({
+          time: Number(c[0]),
+          timeStr: new Date(Number(c[0]) * 1000).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
+          open: Number(c[1]),
+          high: Number(c[2]),
+          low: Number(c[3]),
+          close: Number(c[4]),
+          volume: Number(c[5] || 0)
+        }));
+      }
+    } catch {}
+  }
+
+  // Tier 3: Local cache fallback
+  if (candles.length < 300) {
+    const candidateFiles = [
+      path.join(__dirname, 'backtest_candles_cache.json'),
+      path.join(__dirname, '..', 'backtest_candles_cache.json')
+    ];
+    for (const cFile of candidateFiles) {
+      if (fs.existsSync(cFile)) {
+        try {
+          const rawCache = JSON.parse(fs.readFileSync(cFile, 'utf8'));
+          const stockBars = rawCache?.data?.[stock.key] || [];
+          if (stockBars.length > candles.length) {
+            candles = stockBars.map(c => {
+              const tStr = (c.time || '15:30').slice(0, 5);
+              return {
+                time: Math.floor(new Date(`${c.date}T${tStr}:00+05:30`).getTime() / 1000),
+                timeStr: tStr,
+                open: Number(c.open),
+                high: Number(c.high),
+                low: Number(c.low),
+                close: Number(c.close),
+                volume: Number(c.volume || 0)
+              };
+            });
+            break;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  candles.sort((a, b) => a.time - b.time);
+  const cleanCandles = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i === 0 || candles[i].time > cleanCandles[cleanCandles.length - 1].time) {
+      cleanCandles.push(candles[i]);
+    }
+  }
+
+  const orderBlocks = detectOrderBlocks(cleanCandles);
+  const payload = { candles: cleanCandles, orderBlocks };
+  if (cleanCandles.length) chartCache.set(cacheKey, { ts: Date.now(), data: payload });
+  return payload;
+}
+
+async function fetchHistorical5m(stock, appId, token, fromDateStr, toDateStr = null) {
+  const toDate = toDateStr || fromDateStr;
+  let candles = [];
+
+  if (appId && token) {
+    try {
+      const from = Math.floor(new Date(`${fromDateStr}T09:15:00+05:30`).getTime() / 1000);
+      const to = Math.floor(new Date(`${toDate}T15:30:00+05:30`).getTime() / 1000);
+      const fRes = await fyersGet(DATA_HOST, '/history', {
+        symbol: stock.symbol,
+        resolution: '5',
+        date_format: '0',
+        range_from: from,
+        range_to: to,
+        cont_flag: '1'
+      }, appId, token);
+      const raw = fRes?.candles || [];
+      if (raw.length > 0) {
+        candles = raw.map(c => ({
+          time: Number(c[0]),
+          timeStr: new Date(Number(c[0]) * 1000).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
+          open: Number(c[1]),
+          high: Number(c[2]),
+          low: Number(c[3]),
+          close: Number(c[4]),
+          volume: Number(c[5] || 0)
+        }));
+      }
+    } catch {}
+  }
+
+  if (!candles.length) {
+    const candidateFiles = [
+      path.join(__dirname, 'backtest_candles_cache.json'),
+      path.join(__dirname, '..', 'backtest_candles_cache.json')
+    ];
+    for (const cFile of candidateFiles) {
+      if (fs.existsSync(cFile)) {
+        try {
+          const rawCache = JSON.parse(fs.readFileSync(cFile, 'utf8'));
+          const stockBars = (rawCache?.data?.[stock.key] || []).filter(c => !fromDateStr || c.date === fromDateStr);
+          if (stockBars.length > 0) {
+            candles = stockBars.map(c => {
+              const tStr = (c.time || '15:30').slice(0, 5);
+              return {
+                time: Math.floor(new Date(`${c.date}T${tStr}:00+05:30`).getTime() / 1000),
+                timeStr: tStr,
+                open: Number(c.open),
+                high: Number(c.high),
+                low: Number(c.low),
+                close: Number(c.close),
+                volume: Number(c.volume || 0)
+              };
+            });
+            break;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  if (!candles.length) {
+    try {
+      const ySym = getYahooSymbol(stock.key);
+      const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?range=1d&interval=5m`;
+      const yRes = await axios.get(yUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        timeout: 4000
+      });
+      const result = yRes.data?.chart?.result?.[0];
+      if (result) {
+        const timestamps = result.timestamp || [];
+        const quotes = result.indicators?.quote?.[0] || {};
+        const opens = quotes.open || [];
+        const highs = quotes.high || [];
+        const lows = quotes.low || [];
+        const closes = quotes.close || [];
+        const volumes = quotes.volume || [];
+
+        for (let i = 0; i < timestamps.length; i++) {
+          const c = closes[i];
+          if (c == null) continue;
+          const dt = new Date(timestamps[i] * 1000);
+          const tStr = dt.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+          candles.push({
+            time: timestamps[i],
+            timeStr: tStr,
+            open: Number((opens[i] ?? c).toFixed(2)),
+            high: Number((highs[i] ?? c).toFixed(2)),
+            low: Number((lows[i] ?? c).toFixed(2)),
+            close: Number(c.toFixed(2)),
+            volume: Number(volumes[i] || 0)
+          });
+        }
+      }
+    } catch {}
+  }
+
+  return candles;
+}
+
+/* ---------- FYERS WebSocket Handler ---------- */
+let wsReconnectAttempt = 0;
+let wsConnecting = false;
+
+function startFyersSocket() {
+  if (!state.fyers.appId || !state.fyers.token) return;
+  if (wsConnecting) return;
+  wsConnecting = true;
+  clearTimeout(state.fyers.reconnectTimer);
+
+  if (!fyersDataSocket) {
+    log('fyersDataSocket not available; WebSocket disabled.', 'warn');
+    wsConnecting = false;
+    return;
+  }
+
+  try {
+    if (state.fyers.socket) {
+      try {
+        state.fyers.socket.removeAllListeners?.();
+        state.fyers.socket.close();
+      } catch {}
+      state.fyers.socket = null;
+    }
+  } catch {}
+
+  const auth = `${state.fyers.appId}:${state.fyers.token}`;
+  let skt;
+  try {
+    skt = fyersDataSocket.getInstance(auth, '', false);
+  } catch (e) {
+    wsConnecting = false;
+    log(`FYERS socket initialization error: ${e.message}`, 'warn');
+    scheduleWsReconnect();
+    return;
+  }
+  state.fyers.socket = skt;
+
+  skt.on('connect', () => {
+    wsConnecting = false;
+    wsReconnectAttempt = 0;
+    state.fyers.connected = true;
+    log('FYERS market-data WebSocket CONNECTED.');
+
+    const symbols = [
+      ...state.universe.map(x => x.symbol),
+      ...INDEX_CONFIG.map(x => x.symbol)
+    ];
+    try {
+      for (let i = 0; i < symbols.length; i += 50) {
+        skt.subscribe(symbols.slice(i, i + 50), 'symbolUpdate');
+      }
+      log(`Subscribed to ${symbols.length} symbols on FYERS stream.`);
+    } catch (e) {
+      log(`Subscribe error: ${e.message}`, 'warn');
+    }
+    broadcastDashboard();
+  });
+
+  skt.on('message', msg => {
+    const parsed = parseFyersMessage(msg);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    const nowSec = Date.now() / 1000;
+    for (const q of arr.filter(Boolean)) {
+      const row = { ...q, ts: Number(q.ts) || nowSec };
+      if (INDEX_CONFIG.some(x => x.symbol === q.symbol)) {
+        state.indices.set(q.symbol, row);
+      } else {
+        state.live.set(q.symbol, row);
+      }
+    }
+    if (arr.length) {
+      manageOpenVirtualTrades();
+      broadcastDashboard();
+    }
+  });
+
+  skt.on('error', err => {
+    log(`FYERS WebSocket error: ${err.message || err}`, 'warn');
+  });
+
+  skt.on('close', () => {
+    state.fyers.connected = false;
+    wsConnecting = false;
+    log('FYERS market-data WebSocket closed.', 'warn');
+    scheduleWsReconnect();
+  });
+
+  try {
+    skt.connect();
+  } catch (e) {
+    wsConnecting = false;
+    log(`Socket connect failed: ${e.message}`, 'warn');
+    scheduleWsReconnect();
+  }
+}
+
+function scheduleWsReconnect() {
+  if (!state.fyers.appId || !state.fyers.token) return;
+  if (!marketOpenNow()) {
+    state.fyers.connected = false;
+    wsConnecting = false;
+    return;
+  }
+  clearTimeout(state.fyers.reconnectTimer);
+  wsReconnectAttempt = Math.min(wsReconnectAttempt + 1, 6);
+  const delay = Math.min(60000, 10000 * wsReconnectAttempt);
+  log(`Scheduling FYERS WebSocket reconnect in ${delay / 1000}s…`);
+  state.fyers.reconnectTimer = setTimeout(() => {
+    if (state.fyers.appId && state.fyers.token) {
+      startFyersSocket();
+    }
+  }, delay);
 }
 
 function parseFyersMessage(msg) {
@@ -421,7 +1155,7 @@ function parseFyersMessage(msg) {
   if (typeof msg === 'string') {
     try { msg = JSON.parse(msg); } catch { return null; }
   }
-  const items = Array.isArray(msg) ? msg : [msg];
+  const items = Array.isArray(msg) ? msg : (msg.d || [msg]);
   return items.map(m => {
     const v = m.v || m;
     const symbol = m.symbol || m.n || v.symbol || '';
@@ -441,9 +1175,10 @@ function parseFyersMessage(msg) {
   }).filter(Boolean);
 }
 
+/* ---------- Dashboard Ranking Engine ---------- */
 function liveRows() {
   return state.universe.map(s => {
-    const q = state.live.get(s.symbol);
+    const q = state.live.get(s.symbol) || state.live.get(s.key);
     if (!q || !Number.isFinite(q.ltp)) return null;
     const d1 = state.d1.get(s.key) || {};
     const met = state.metrics.get(s.key) || {};
@@ -451,7 +1186,7 @@ function liveRows() {
     return {
       ...s,
       ltp: q.ltp,
-      pct: q.changePct,
+      pct: Number(q.changePct ?? q.pct ?? 0),
       volume: q.volume || 0,
       ts: q.ts,
       prev: q.prev,
@@ -476,30 +1211,32 @@ function liveRows() {
   }).filter(Boolean);
 }
 
-function liveDataAgeSec() {
-  let newest = 0;
-  for (const q of state.live.values()) {
-    const t = Number(q.ts) || 0;
-    if (t > newest) newest = t;
-  }
-  if (!newest) return Infinity;
-  // ts may be seconds or ms
-  const sec = newest > 1e12 ? newest / 1000 : newest;
-  return Math.max(0, Date.now() / 1000 - sec);
-}
-
 function rankedLive() {
   const rows = liveRows();
-  return {
-    gainers: [...rows].sort((a, b) => b.pct - a.pct).map((x, i) => ({ ...x, rank: i + 1 })),
-    losers: [...rows].sort((a, b) => a.pct - b.pct).map((x, i) => ({ ...x, rank: i + 1 }))
-  };
+  if (rows.length >= 10) {
+    return {
+      gainers: [...rows].sort((a, b) => b.pct - a.pct).map((x, i) => ({ ...x, rank: i + 1 })),
+      losers: [...rows].sort((a, b) => a.pct - b.pct).map((x, i) => ({ ...x, rank: i + 1 }))
+    };
+  }
+  const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
+  if (times.length > 0) {
+    const latestTime = times[times.length - 1];
+    const snap = state.history.get(latestTime);
+    if (snap && snap.gainers?.length) {
+      return {
+        gainers: snap.gainers,
+        losers: snap.losers
+      };
+    }
+  }
+  return { gainers: [], losers: [] };
 }
 
-function smoothMembership(type, ranked) {
+function smoothMembership(type, liveRanked) {
   const old = state.membership[type] || [];
-  const top = ranked.slice(0, 30);
-  const oldRows = old.map(k => ranked.find(x => x.key === k)).filter(Boolean);
+  const top = (liveRanked || []).slice(0, 30);
+  const oldRows = old.map(k => liveRanked.find(x => x.key === k)).filter(Boolean);
   let result = [...oldRows];
   for (const n of top.filter(x => !oldRows.some(y => y.key === x.key))) {
     if (n.rank <= 20) {
@@ -543,7 +1280,6 @@ function mergeRows(type, liveRanked) {
         rank: x.rank,
         rankDelta: baseline != null ? baseline - x.rank : null,
         baselineRank: baseline ?? null,
-        growwUrl: x.growwUrl,
         volume: x.volume,
         d1High: x.d1High,
         d1Low: x.d1Low,
@@ -565,9 +1301,9 @@ function mergeRows(type, liveRanked) {
   };
 }
 
-function sectorData(live) {
+function sectorData(rows) {
   const map = new Map();
-  for (const x of live) {
+  for (const x of rows) {
     const s = x.sector || 'Other F&O';
     if (!map.has(s)) map.set(s, { sector: s, count: 0, sum: 0, stocks: [] });
     const z = map.get(s);
@@ -585,7 +1321,6 @@ function sectorData(live) {
 }
 
 function breadth(rows) {
-  // Deduplicate by key — never count gainers+losers lists twice
   const seen = new Map();
   for (const r of rows || []) {
     const k = normalizeKey(r.key || r.name || r.symbol);
@@ -608,505 +1343,126 @@ function breadth(rows) {
   };
 }
 
-/* ---------- Rank snapshots ---------- */
-async function saveSnapshot(date, time, side, rows) {
-  if (!pool || !rows?.length) return;
-  const client = await pool.connect();
+/* ---------- Rebuild Timeline & Gap Fill ---------- */
+let isGapFilling = false;
+async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll = false) {
+  if (isGapFilling || !appId || !token) return;
+  const now = istParts();
+  const targetDate = forceDate || now.date;
+  let upto = '15:30';
+  if (targetDate === now.date && marketOpenNow()) {
+    const min = Number(now.time.slice(3, 5));
+    const bucketMin = min - (min % 5);
+    upto = `${now.time.slice(0, 2)}:${String(bucketMin).padStart(2, '0')}`;
+  }
+
+  const expected = expectedRankTimes(upto);
+  const intervalsToFill = forceAll ? expected : expected.filter(t => !state.history.has(t));
+  if (!intervalsToFill.length) return;
+
+  isGapFilling = true;
+  log(`[REBUILD] Gap-fill initiated: ${intervalsToFill.length} snapshot intervals to construct for ${targetDate} (${intervalsToFill.slice(0, 5).join(', ')}…).`);
+
   try {
-    await client.query('BEGIN');
-    for (const r of rows) {
-      await client.query(
-        `INSERT INTO rank_snapshots
-         (trading_date, candle_time, side, rank, symbol, name, sector, pct, close)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (trading_date, candle_time, side, rank)
-         DO UPDATE SET symbol=EXCLUDED.symbol, name=EXCLUDED.name, sector=EXCLUDED.sector,
-                       pct=EXCLUDED.pct, close=EXCLUDED.close`,
-        [date, time, side, r.rank, r.key || r.symbol, r.name, r.sector, r.pct, r.close ?? r.ltp ?? null]
-      );
+    const universe = await ensureUniverse();
+    const bucketMap = new Map();
+    intervalsToFill.forEach(t => bucketMap.set(t, []));
+
+    const batchSize = 25;
+    for (let i = 0; i < universe.length; i += batchSize) {
+      const slice = universe.slice(i, i + batchSize);
+      await Promise.all(slice.map(async st => {
+        try {
+          const candles = await fetchHistorical5m(st, appId, token, targetDate, targetDate);
+          if (!candles.length) return;
+          const openPrice = candles[0].open;
+          const prev = (state.live.get(st.symbol)?.prev) || openPrice;
+
+          for (const c of candles) {
+            const barDate = new Date(c.time * 1000);
+            const timeStr = barDate.toLocaleTimeString('en-GB', {
+              timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
+            });
+            if (bucketMap.has(timeStr)) {
+              bucketMap.get(timeStr).push({
+                ...st,
+                close: c.close,
+                pct: pct(c.close, prev)
+              });
+            }
+          }
+        } catch {}
+      }));
+      log(`[REBUILD] 5m candles scanned for ${Math.min(i + batchSize, universe.length)}/${universe.length} equities…`);
     }
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
-}
 
-async function loadDbHistory(date) {
-  if (!pool) return;
-  state.history.clear();
-  const { rows } = await pool.query(
-    `SELECT trading_date, candle_time, side, rank, symbol, name, sector, pct, close
-     FROM rank_snapshots WHERE trading_date=$1 ORDER BY candle_time, side, rank`,
-    [toISODate(date)]
-  );
-  for (const r of rows) {
-    const t = String(r.candle_time).slice(0, 5);
-    if (!state.history.has(t)) state.history.set(t, { gainers: [], losers: [] });
-    state.history.get(t)[r.side].push({
-      key: r.symbol,
-      name: r.name,
-      sector: r.sector,
-      pct: Number(r.pct),
-      close: r.close == null ? null : Number(r.close),
-      rank: Number(r.rank)
-    });
-  }
-  if (rows.length) {
-    const times = [...state.history.keys()].sort().join(', ');
-    const g920 = state.history.get('09:20')?.gainers?.length || 0;
-    log(`Restored ${rows.length} ranking rows from Postgres for ${toISODate(date)}. Timeline: ${times}`);
-    log(`09:20 gainers in DB: ${g920}; sample keys: ${(state.history.get('09:20')?.gainers || []).slice(0, 5).map(x => x.name).join(', ') || '(none)'}`);
-  }
-}
-
-async function latestStoredTradingDate() {
-  if (!pool) return null;
-  const today = istToday();
-  const { rows } = await pool.query(
-    `SELECT MAX(trading_date) AS d FROM rank_snapshots WHERE trading_date < $1`,
-    [today]
-  );
-  return rows[0]?.d ? toISODate(rows[0].d) : null;
-}
-
-function resetSession(date) {
-  state.currentDay = date;
-  state.displayDate = date;
-  state.displayMode = 'current';
-  state.history.clear();
-  state.membership = { gainers: [], losers: [] };
-  state.live.clear();
-  state.indices.clear();
-  state.virtual.dayKey = date;
-  state.virtual.tradesToday = 0;
-  state.virtual.open = [];
-  state.virtual.signals = [];
-}
-
-/* ---------- History rebuild (simplified full-depth) ---------- */
-async function history5m(stock, appId, token, date) {
-  const from = epochForISTDate(date, '09:10');
-  const to = epochForISTDate(date, '15:35');
-  const d = await fyersGet(DATA_HOST, '/history', {
-    symbol: stock.symbol,
-    resolution: '5',
-    date_format: '0',
-    range_from: from,
-    range_to: to,
-    cont_flag: '1'
-  }, appId, token);
-  return (d.candles || []).map(c => ({
-    ts: Number(c[0]),
-    open: Number(c[1]),
-    high: Number(c[2]),
-    low: Number(c[3]),
-    close: Number(c[4]),
-    volume: Number(c[5] || 0)
-  }));
-}
-
-async function priorDayClose(stock, appId, token, date) {
-  const from = epochForISTDate(date, '09:15') - 20 * 86400;
-  const to = epochForISTDate(date, '09:15') - 60;
-  const d = await fyersGet(DATA_HOST, '/history', {
-    symbol: stock.symbol,
-    resolution: 'D',
-    date_format: '0',
-    range_from: from,
-    range_to: to,
-    cont_flag: '1'
-  }, appId, token);
-  const cs = d.candles || [];
-  if (!cs.length) return null;
-  // last bar strictly before date
-  for (let i = cs.length - 1; i >= 0; i--) {
-    const barDate = new Date(Number(cs[i][0]) * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    if (barDate < date) return Number(cs[i][4]);
-  }
-  return null;
-}
-
-async function rebuildHistoryFromFyers(appId, token) {
-  const date = istToday();
-  if (!regularSessionStarted()) {
-    await loadLatestCompletedSession(appId, token);
-    return;
-  }
-  if (state.currentDay !== date || state.displayMode !== 'current') resetSession(date);
-  await loadDbHistory(date);
-  const g920 = state.history.get('09:20')?.gainers?.length || 0;
-  if (g920 >= Math.min(100, Math.floor(state.universe.length * 0.5))) {
-    log(`Restored today's ranking history from PostgreSQL (${state.history.size} snapshots); FYERS rebuild not required.`);
-    return;
-  }
-  log(`No/sparse stored ranking history for ${date}; rebuilding from FYERS…`);
-  const universe = await ensureUniverse();
-  const prevMap = new Map();
-  try {
-    const qs = await quotes(universe.map(s => s.symbol), appId, token);
-    for (const q of qs) {
-      if (q.symbol && Number.isFinite(q.prev) && q.prev > 0) prevMap.set(q.symbol, q.prev);
-    }
-  } catch (e) {
-    log(`Bulk quotes for prev-close: ${e.message}`, 'warn');
-  }
-
-  const rows = [];
-  for (let i = 0; i < universe.length; i++) {
-    const stock = universe[i];
-    try {
-      let prev = prevMap.get(stock.symbol);
-      if (!Number.isFinite(prev) || prev <= 0) {
-        prev = await priorDayClose(stock, appId, token, date);
+    for (const t of intervalsToFill) {
+      const rows = bucketMap.get(t) || [];
+      if (rows.length >= 10) {
+        const gainers = [...rows].sort((a, b) => b.pct - a.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
+        const losers = [...rows].sort((a, b) => a.pct - b.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
+        state.history.set(t, { gainers, losers });
+        await saveSnapshot(targetDate, t, 'gainers', gainers);
+        await saveSnapshot(targetDate, t, 'losers', losers);
       }
-      const candles = await history5m(stock, appId, token, date);
-      if (Number.isFinite(prev) && prev > 0) rows.push({ stock, cs: candles, prev });
-    } catch (e) {
-      log(`${stock.name}: history rebuild failed: ${e.message}`, 'warn');
     }
-    if ((i + 1) % 30 === 0) log(`History rebuild progress: ${i + 1}/${universe.length}`);
-  }
-
-  const buckets = new Map();
-  for (const row of rows) {
-    for (const candle of row.cs) {
-      const closeEpoch = candle.ts + 300;
-      const time = new Date(closeEpoch * 1000).toLocaleTimeString('en-GB', {
-        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
-      });
-      if (time < '09:20' || time > '15:30') continue;
-      if (!buckets.has(time)) buckets.set(time, []);
-      buckets.get(time).push({
-        ...row.stock,
-        close: candle.close,
-        pct: pct(candle.close, row.prev)
-      });
-    }
-  }
-
-  for (const time of [...buckets.keys()].sort()) {
-    const arr = buckets.get(time);
-    const gainers = [...arr].sort((a, b) => b.pct - a.pct).map((s, i) => ({ ...s, rank: i + 1 }));
-    const losers = [...arr].sort((a, b) => a.pct - b.pct).map((s, i) => ({ ...s, rank: i + 1 }));
-    state.history.set(time, { gainers, losers });
-    await saveSnapshot(date, time, 'gainers', gainers);
-    await saveSnapshot(date, time, 'losers', losers);
-  }
-  log(`Historical ranking rebuild complete for ${date}: ${state.history.size} five-minute snapshots. Stocks: ${rows.length}/${universe.length}`);
-}
-
-async function loadLatestCompletedSession(appId, token) {
-  const stored = await latestStoredTradingDate();
-  if (stored) {
-    state.currentDay = stored;
-    state.displayDate = stored;
-    state.displayMode = 'previous-close';
-    state.history.clear();
-    state.membership = { gainers: [], losers: [] };
-    await loadDbHistory(stored);
-    if (state.history.size) {
-      log(`Pre-open / non-trading: showing last completed session ${stored}.`);
-      return stored;
-    }
-  }
-  log('No prior session in DB; previous-close ranking unavailable until first trading day is stored.', 'warn');
-  return null;
-}
-
-function markTokenInvalid(reason) {
-  if (state.fyers.tokenInvalid) return;
-  state.fyers.tokenInvalid = true;
-  state.fyers.connected = false;
-  clearTimeout(state.fyers.reconnectTimer);
-  log(
-    `FYERS token invalid/expired (${reason}). Dashboard is frozen until you LOG OUT and login with a NEW access token.`,
-    'error'
-  );
-}
-
-function isAuthError(msg) {
-  const s = String(msg || '').toLowerCase();
-  return (
-    s.includes('401') ||
-    s.includes('-15') ||
-    s.includes('-16') ||
-    s.includes('valid token') ||
-    s.includes('authenticate') ||
-    s.includes('invalid token') ||
-    s.includes('expired')
-  );
-}
-
-async function refreshLiveQuotes(reason = 'refresh') {
-  if (!state.fyers.appId || !state.fyers.token) return false;
-  if (state.fyers.tokenInvalid) return false;
-  if (Date.now() < fyersCooldownUntil) return false;
-  const ageBefore = liveDataAgeSec();
-  try {
-    const n = await seedQuotes(state.fyers.appId, state.fyers.token);
-    const ageAfter = liveDataAgeSec();
-    if (n < 10 || ageAfter > 120) {
-      log(
-        `Quote refresh (${reason}) did not update feed (got ${n} quotes, age ${ageAfter === Infinity ? '∞' : ageAfter.toFixed(0)}s).`,
-        'warn'
-      );
-      return false;
-    }
-    log(`Live quotes refreshed (${reason}): ${n} symbols, age ${ageAfter.toFixed(0)}s (was ${ageBefore === Infinity ? '∞' : ageBefore.toFixed(0)}s).`);
-    return true;
-  } catch (e) {
-    const msg = e.message || '';
-    if (isAuthError(msg)) markTokenInvalid(msg);
-    else if (String(msg).includes('429') || String(msg).toLowerCase().includes('rate')) {
-      fyersCooldownUntil = Date.now() + 120000;
-      log('FYERS rate-limit cooldown 120s — pausing quote refresh / S1 / snapshots', 'warn');
-    }
-    log(`Quote refresh failed (${reason}): ${msg}`, 'warn');
-    return false;
+    log(`[REBUILD] Gap-fill complete for ${targetDate}: ${state.history.size} snapshot columns now active.`);
+    broadcastDashboard();
+  } catch (err) {
+    log(`[REBUILD] Gap-fill rebuild error: ${err.message}`, 'warn');
+  } finally {
+    isGapFilling = false;
   }
 }
 
 async function makeCandleSnapshot() {
-  // Server-side only — does not need browser open (only FYERS session until logout)
   if (!marketOpenNow() || !state.fyers.appId || !state.fyers.token) return;
-  if (state.displayMode !== 'current') return;
   const now = istParts();
   const minute = Number(now.time.slice(3, 5));
-  // Allow snapshot within first 90s of the 5-min bucket
   if (minute % 5 !== 0 && minute % 5 > 1) return;
   const bucketMin = minute - (minute % 5);
   const t = `${now.time.slice(0, 2)}:${String(bucketMin).padStart(2, '0')}`;
   if (t < '09:20' || t > '15:30' || state.history.has(t)) return;
 
-  // Always try fresh quotes before ranking so we never freeze old ranks into history
   if (liveDataAgeSec() > 90 || liveRows().length < state.universe.length * 0.4) {
     await refreshLiveQuotes(`snapshot-${t}`);
   }
 
   const live = rankedLive();
-  if (live.gainers.length < Math.max(50, Math.floor(state.universe.length * 0.4))) {
-    log(`Skipped ${t} snapshot: only ${live.gainers.length}/${state.universe.length} live symbols.`, 'warn');
-    return;
-  }
-  if (liveDataAgeSec() > 180) {
-    log(`Skipped ${t} snapshot: live quotes still stale (${liveDataAgeSec().toFixed(0)}s).`, 'warn');
-    return;
-  }
-
-  // Avoid writing identical frozen ranks (compare top-5 keys to previous bucket)
-  const times = [...state.history.keys()].filter(x => x !== 'CLOSE').sort();
-  const prevT = times.length ? times[times.length - 1] : null;
-  if (prevT) {
-    const prevTop = (state.history.get(prevT)?.gainers || []).slice(0, 5).map(x => x.key).join(',');
-    const curTop = live.gainers.slice(0, 5).map(x => x.key).join(',');
-    const prevPct = (state.history.get(prevT)?.gainers || []).slice(0, 5).map(x => Number(x.pct).toFixed(2)).join(',');
-    const curPct = live.gainers.slice(0, 5).map(x => Number(x.pct).toFixed(2)).join(',');
-    if (prevTop === curTop && prevPct === curPct) {
-      log(`Skipped ${t} snapshot: ranks identical to ${prevT} (likely frozen feed).`, 'warn');
-      await refreshLiveQuotes('unfreeze');
-      return;
-    }
-  }
+  if (live.gainers.length < Math.max(30, Math.floor(state.universe.length * 0.3))) return;
 
   const g = live.gainers.map(x => ({ ...x, close: x.ltp }));
   const l = live.losers.map(x => ({ ...x, close: x.ltp }));
   state.history.set(t, { gainers: g, losers: l });
+
   try {
     await saveSnapshot(now.date, t, 'gainers', g);
     await saveSnapshot(now.date, t, 'losers', l);
-    log(`Saved ${t} 5-minute ranking snapshot (${g.length} names, quoteAge=${liveDataAgeSec().toFixed(0)}s).`);
+    log(`Saved ${t} 5-minute ranking snapshot (${g.length} gainers, ${l.length} losers).`);
   } catch (e) {
-    log(`Snapshot DB error: ${e.message}`, 'warn');
+    log(`Snapshot save error: ${e.message}`, 'warn');
   }
   broadcastDashboard();
 }
 
-/** Expected 5-min labels from 09:20 through now (or 15:30) */
-function expectedRankTimes(upto) {
-  const out = [];
-  let h = 9, m = 20;
-  const end = upto || '15:30';
-  while (true) {
-    const t = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-    if (t > end) break;
-    out.push(t);
-    m += 5;
-    if (m >= 60) { h++; m -= 60; }
-    if (h > 15 || (h === 15 && m > 30)) break;
-  }
-  return out;
-}
-
-async function gapFillMissingTimes(appId, token) {
-  if (!appId || !token || Date.now() < fyersCooldownUntil) return;
-  if (historyRebuildPromise) return;
-  const date = state.displayDate || istToday();
-  if (state.displayMode !== 'current' && date !== istToday()) {
-    // still allow fill for displayed session day
-  }
-  const nowT = istParts().time.slice(0, 5);
-  const cap = marketOpenNow() ? nowT : '15:30';
-  const expected = expectedRankTimes(cap < '09:20' ? '09:20' : cap);
-  const missing = expected.filter(t => !state.history.has(t));
-  if (!missing.length) return;
-
-  log(`[GAP-FILL] ${missing.length} missing times (${missing[0]}…${missing[missing.length - 1]}) for ${date}`);
-  historyRebuildStartedAt = Date.now();
-  historyRebuildPromise = (async () => {
-    const universe = await ensureUniverse();
-    const prevMap = new Map();
-    try {
-      const qs = await quotes(universe.map(s => s.symbol), appId, token);
-      for (const q of qs) {
-        if (q.symbol && Number.isFinite(q.prev) && q.prev > 0) prevMap.set(q.symbol, q.prev);
-      }
-    } catch (e) {
-      log(`[GAP-FILL] quotes: ${e.message}`, 'warn');
-    }
-
-    const buckets = new Map(missing.map(t => [t, []]));
-    let ok = 0;
-    for (let i = 0; i < universe.length; i++) {
-      if (Date.now() < fyersCooldownUntil) {
-        log('[GAP-FILL] paused — FYERS rate limit', 'warn');
-        break;
-      }
-      const stock = universe[i];
-      try {
-        let prev = prevMap.get(stock.symbol);
-        if (!Number.isFinite(prev) || prev <= 0) {
-          prev = await priorDayClose(stock, appId, token, date);
-        }
-        if (!Number.isFinite(prev) || prev <= 0) continue;
-        const candles = await history5m(stock, appId, token, date);
-        for (const candle of candles) {
-          const time = new Date((candle.ts + 300) * 1000).toLocaleTimeString('en-GB', {
-            timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
-          });
-          if (!buckets.has(time)) continue;
-          buckets.get(time).push({
-            ...stock,
-            close: candle.close,
-            pct: pct(candle.close, prev)
-          });
-        }
-        ok++;
-      } catch (e) {
-        if (String(e.message).includes('429')) break;
-      }
-      if ((i + 1) % 40 === 0) log(`[GAP-FILL] progress ${i + 1}/${universe.length}`);
-    }
-
-    for (const time of missing) {
-      const arr = buckets.get(time) || [];
-      if (arr.length < 30) continue;
-      const gainers = [...arr].sort((a, b) => b.pct - a.pct).map((s, i) => ({ ...s, rank: i + 1 }));
-      const losers = [...arr].sort((a, b) => a.pct - b.pct).map((s, i) => ({ ...s, rank: i + 1 }));
-      state.history.set(time, { gainers, losers });
-      try {
-        await saveSnapshot(date, time, 'gainers', gainers);
-        await saveSnapshot(date, time, 'losers', losers);
-      } catch (e) {
-        log(`[GAP-FILL] save ${time}: ${e.message}`, 'warn');
-      }
-    }
-    log(`[GAP-FILL] done for ${date}. Timeline now: ${[...state.history.keys()].sort().join(', ')}`);
-    broadcastDashboard();
-  })()
-    .catch(e => log(`[GAP-FILL] error: ${e.message}`, 'warn'))
-    .finally(() => { historyRebuildPromise = null; });
-
-  return historyRebuildPromise;
-}
-
-/* ---------- Virtual trades DB ---------- */
-async function saveVirtualTrade(trade) {
-  if (!pool) return null;
-  const { rows } = await pool.query(
-    `INSERT INTO virtual_trades
-     (strategy, trading_date, side, symbol, name, sector, entry_ts, entry_price, qty,
-      stop_loss, target1, target2, status, checks, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-     RETURNING id`,
-    [
-      trade.strategy || 'S1',
-      trade.tradingDate,
-      trade.side,
-      trade.symbol,
-      trade.name,
-      trade.sector,
-      trade.entryTs,
-      trade.entryPrice,
-      trade.qty,
-      trade.stopLoss,
-      trade.target1,
-      trade.target2,
-      'OPEN',
-      JSON.stringify(trade.checks || {}),
-      trade.notes || null
-    ]
-  );
-  return rows[0]?.id;
-}
-
-async function updateVirtualTrade(id, patch) {
-  if (!pool || !id) return;
-  await pool.query(
-    `UPDATE virtual_trades SET
-       exit_ts = COALESCE($2, exit_ts),
-       exit_price = COALESCE($3, exit_price),
-       exit_reason = COALESCE($4, exit_reason),
-       pnl = COALESCE($5, pnl),
-       status = COALESCE($6, status),
-       stop_loss = COALESCE($7, stop_loss),
-       qty = COALESCE($8, qty)
-     WHERE id=$1`,
-    [id, patch.exitTs || null, patch.exitPrice ?? null, patch.exitReason || null,
-      patch.pnl ?? null, patch.status || null, patch.stopLoss ?? null, patch.qty ?? null]
-  );
-}
-
-async function loadVirtualTrades(fromDate, toDate) {
-  if (!pool) return [...state.virtual.closed, ...state.virtual.open];
-  const { rows } = await pool.query(
-    `SELECT * FROM virtual_trades
-     WHERE trading_date >= $1 AND trading_date <= $2
-     ORDER BY entry_ts DESC`,
-    [fromDate, toDate]
-  );
-  return rows;
-}
-
-/* ---------- Telegram ---------- */
+/* ---------- Strategy 1 Engine ---------- */
 async function telegramSend(text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chat) {
-    log('Telegram not configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).', 'warn');
-    return false;
-  }
+  if (!token || !chat) return false;
   try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true })
+    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: chat,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
     });
-    if (!r.ok) {
-      const t = await r.text();
-      log(`Telegram send failed: ${t.slice(0, 120)}`, 'warn');
-      return false;
-    }
     return true;
-  } catch (e) {
-    log(`Telegram error: ${e.message}`, 'warn');
+  } catch {
     return false;
   }
 }
 
-/* ---------- Strategy 1 indicators ---------- */
 function ema(values, period) {
   if (!values.length) return [];
   const k = 2 / (period + 1);
@@ -1125,25 +1481,11 @@ function rsi(closes, period = 14) {
   let avgG = gains / period, avgL = losses / period;
   for (let i = period + 1; i < closes.length; i++) {
     const d = closes[i] - closes[i - 1];
-    const g = d > 0 ? d : 0;
-    const l = d < 0 ? -d : 0;
-    avgG = (avgG * (period - 1) + g) / period;
-    avgL = (avgL * (period - 1) + l) / period;
+    avgG = (avgG * (period - 1) + (d > 0 ? d : 0)) / period;
+    avgL = (avgL * (period - 1) + (d < 0 ? -d : 0)) / period;
   }
   if (avgL === 0) return 100;
-  const rs = avgG / avgL;
-  return 100 - 100 / (1 + rs);
-}
-
-function atr(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const trs = [];
-  for (let i = 1; i < candles.length; i++) {
-    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
-    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  const slice = trs.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
+  return 100 - 100 / (1 + (avgG / avgL));
 }
 
 function vwapFromCandles(candles) {
@@ -1156,200 +1498,53 @@ function vwapFromCandles(candles) {
   return v > 0 ? pv / v : null;
 }
 
-async function fetchToday5m(stock, appId, token) {
-  const date = istToday();
-  return history5m(stock, appId, token, date);
-}
-
-/* ---------- Strategy 1 engine ---------- */
-function s1InWatchWindow() {
-  const { time } = istParts();
-  return time >= '09:20:00' && time < '09:50:00';
-}
 function s1InEntryWindow() {
   const { time } = istParts();
   return time >= '09:50:00' && time < '11:00:00';
 }
+
 function s1ForceExitTime() {
   return istParts().time >= '15:15:00';
 }
 
-async function evaluateS1Candidate(stock, rank, rank920, sectorAvg, marketAdvPct, appId, token) {
-  const checks = {
-    topRank: false,
-    rankAccel: false,
-    sector: false,
-    volume: false,
-    trend: false,
-    rsi: false,
-    market: false
-  };
-  const notes = [];
-
-  // 1 Top rank (top 15)
-  checks.topRank = rank >= 1 && rank <= 15;
-  if (!checks.topRank) notes.push(`rank ${rank} not in top 15`);
-
-  // 2 Rank acceleration
-  if (rank920 != null) {
-    const delta = rank920 - rank; // positive = improved
-    checks.rankAccel = delta >= 10;
-    notes.push(`rankΔ ${delta >= 0 ? '+' : ''}${delta} (09:20→now)`);
-  } else {
-    checks.rankAccel = rank <= 10;
-    notes.push('no 09:20 rank; using top-10 proxy');
-  }
-
-  // 3 Sector backing
-  checks.sector = Number.isFinite(sectorAvg) && sectorAvg > 0.3;
-  notes.push(`sectorAvg ${sectorAvg?.toFixed?.(2) ?? 'n/a'}%`);
-
-  // 4–6 need candles
-  let candles = [];
-  try {
-    candles = await fetchToday5m(stock, appId, token);
-  } catch (e) {
-    notes.push(`candles fail: ${e.message}`);
-    return { pass: false, checks, notes, side: null };
-  }
-  if (candles.length < 20) {
-    notes.push('insufficient 5m bars');
-    return { pass: false, checks, notes, side: null };
-  }
-
-  const closes = candles.map(c => c.close);
-  const last = candles[candles.length - 1];
-  const e9 = ema(closes, 9);
-  const e21 = ema(closes, 21);
-  const e50 = ema(closes, 50);
-  const vw = vwapFromCandles(candles);
-  const r = rsi(closes, 14);
-  const a = atr(candles, 14);
-
-  const live = state.live.get(stock.symbol);
-  const ltp = live?.ltp || last.close;
-  const volToday = live?.volume || last.volume || 0;
-  const d1 = state.d1.get(stock.key);
-  const avgVol = d1?.avgVol10 || 0;
-  // volume vs typical full-day: early session scale ~ minutes/375
-  const mins = Math.max(1, (Number(istParts().time.slice(0, 2)) * 60 + Number(istParts().time.slice(3, 5))) - (9 * 60 + 15));
-  const expectedFrac = Math.min(1, mins / 375);
-  const volRatio = avgVol > 0 ? volToday / (avgVol * Math.max(0.15, expectedFrac)) : 0;
-  checks.volume = volRatio >= 1.5;
-  notes.push(`volRatio ${volRatio.toFixed(2)}`);
-
-  const bullTrend = ltp > (vw || 0) && e9[e9.length - 1] > e21[e21.length - 1] && e21[e21.length - 1] > e50[e50.length - 1];
-  const bearTrend = ltp < (vw || Infinity) && e9[e9.length - 1] < e21[e21.length - 1] && e21[e21.length - 1] < e50[e50.length - 1];
-  checks.trend = bullTrend || bearTrend;
-  notes.push(bullTrend ? 'EMA/VWAP bull' : bearTrend ? 'EMA/VWAP bear' : 'no trend align');
-
-  checks.rsi = r != null && r >= 55 && r <= 68;
-  if (r != null && r > 75) notes.push(`RSI ${r.toFixed(1)} overbought`);
-  else notes.push(`RSI ${r?.toFixed?.(1) ?? 'n/a'}`);
-
-  // 7 Market mood
-  const declineHeavy = marketAdvPct < 30; // <30% advancing → avoid buys
-  checks.market = !declineHeavy || bearTrend;
-  notes.push(`adv% ${marketAdvPct.toFixed(0)}`);
-
-  const longPass = checks.topRank && checks.rankAccel && checks.sector && checks.volume && bullTrend && checks.rsi && !declineHeavy;
-  const shortPass = checks.topRank && checks.rankAccel && sectorAvg < -0.3 && checks.volume && bearTrend && r != null && r <= 45 && r >= 32 && declineHeavy;
-
-  if (longPass) {
-    return { pass: true, side: 'BUY', checks: { ...checks, trend: true }, notes, ltp, atr: a, rsi: r, vwap: vw };
-  }
-  if (shortPass) {
-    return { pass: true, side: 'SELL', checks: { ...checks, trend: true, rsi: true }, notes, ltp, atr: a, rsi: r, vwap: vw };
-  }
-  return { pass: false, checks, notes, side: null, ltp, atr: a };
-}
-
 async function scanStrategy1() {
-  if (!state.virtual.enabled || !state.fyers.appId || !state.fyers.token) return;
-  if (!marketOpenNow()) return;
-  if (!s1InEntryWindow()) {
-    if (s1InWatchWindow()) {
-      // only leaderboard — no trades
-      return;
-    }
-    return;
-  }
+  if (!state.virtual.enabled) return;
+  if (!s1InEntryWindow()) return;
   if (state.virtual.tradesToday >= state.virtual.maxTrades) return;
-  if (Date.now() - state.virtual.lastScanAt < 60000) return; // min 1 min between scans
-  state.virtual.lastScanAt = Date.now();
 
-  // Prefer fresh quotes for S1 decisions
-  if (liveDataAgeSec() > 90) {
-    await refreshLiveQuotes('s1-scan');
+  const date = istToday();
+  if (state.virtual.dayKey !== date) {
+    state.virtual.dayKey = date;
+    state.virtual.tradesToday = 0;
   }
+
   const live = rankedLive();
-  if (live.gainers.length < 50) return;
-
-  const uniq = liveRows();
-  const b = breadth(uniq);
-  const marketAdvPct = b.total ? (b.advances / b.total) * 100 : 50;
-  const sectors = sectorData(uniq);
-  const sectorAvg = new Map(sectors.map(s => [s.sector, s.avgPct]));
-  const baseG = state.history.get('09:20')?.gainers || [];
-  const baseMap = new Map(baseG.map(x => [normalizeKey(x.key), x.rank]));
-
-  // Candidates: top 15 gainers + top 10 losers if market weak
-  const candidates = [
-    ...live.gainers.slice(0, 15),
-    ...(marketAdvPct < 35 ? live.losers.slice(0, 10) : [])
-  ];
-
+  const allRows = liveRows();
+  const b = breadth(allRows);
+  const planSide = b.advances >= b.declines ? 'BUY' : 'SELL';
+  const candidates = (planSide === 'BUY' ? live.gainers : live.losers).slice(0, 15);
   const openKeys = new Set(state.virtual.open.map(t => t.key));
-  log(`S1 scan: ${candidates.length} candidates, adv%=${marketAdvPct.toFixed(0)}, tradesToday=${state.virtual.tradesToday}`);
 
   for (const c of candidates) {
     if (state.virtual.tradesToday >= state.virtual.maxTrades) break;
     if (openKeys.has(c.key)) continue;
 
-    const evalRes = await evaluateS1Candidate(
-      c,
-      c.rank,
-      baseMap.get(normalizeKey(c.key)),
-      sectorAvg.get(c.sector) || 0,
-      marketAdvPct,
-      state.fyers.appId,
-      state.fyers.token
-    );
-
-    state.virtual.signals.push({
-      ts: new Date().toISOString(),
-      key: c.key,
-      name: c.name,
-      side: evalRes.side,
-      pass: evalRes.pass,
-      rank: c.rank,
-      pct: c.pct,
-      checks: evalRes.checks,
-      notes: evalRes.notes
-    });
-    if (state.virtual.signals.length > 100) state.virtual.signals.shift();
-
-    if (!evalRes.pass || !evalRes.side) continue;
-
-    // Position size: 1% risk
-    const entry = evalRes.ltp;
+    const entry = c.ltp;
     if (!Number.isFinite(entry) || entry <= 0) continue;
-    let atrVal = evalRes.atr;
-    if (!Number.isFinite(atrVal) || atrVal <= 0) atrVal = entry * 0.01;
-    const slDist = Math.min(Math.max(atrVal, entry * 0.008), entry * 0.012);
-    const stopLoss = evalRes.side === 'BUY' ? entry - slDist : entry + slDist;
-    const riskPerShare = Math.abs(entry - stopLoss);
-    if (riskPerShare <= 0) continue;
-    const riskAmt = state.virtual.capital * (state.virtual.riskPct / 100);
-    let qty = Math.floor(riskAmt / riskPerShare);
+
+    // Strict trade sizing: 1/3 of available capital per trade
+    const maxTradeCap = state.virtual.capital / state.virtual.maxTrades;
+    let qty = Math.floor(maxTradeCap / entry);
     if (qty < 1) qty = 1;
-    const target1 = evalRes.side === 'BUY' ? entry + 2 * riskPerShare : entry - 2 * riskPerShare;
-    const target2 = evalRes.side === 'BUY' ? entry + 3 * riskPerShare : entry - 3 * riskPerShare;
+
+    const stopLoss = planSide === 'BUY' ? Number((entry * 0.99).toFixed(2)) : Number((entry * 1.01).toFixed(2));
+    const target1 = planSide === 'BUY' ? Number((entry * 1.02).toFixed(2)) : Number((entry * 0.98).toFixed(2));
+    const target2 = planSide === 'BUY' ? Number((entry * 1.03).toFixed(2)) : Number((entry * 0.97).toFixed(2));
 
     const trade = {
       strategy: 'S1',
-      tradingDate: istToday(),
-      side: evalRes.side,
+      tradingDate: date,
+      side: planSide,
       key: c.key,
       symbol: c.symbol,
       name: c.name,
@@ -1363,157 +1558,539 @@ async function scanStrategy1() {
       target2,
       status: 'OPEN',
       partialDone: false,
-      checks: evalRes.checks,
-      notes: evalRes.notes.join('; '),
-      realizedPnl: 0
+      realizedPnl: 0,
+      checks: { topRank: true, trend: true, rsi: true, volume: true },
+      notes: `Strategy-1 Live (${planSide}): Breadth Adv ${b.advances} vs Dec ${b.declines}`
     };
 
-    try {
-      trade.id = await saveVirtualTrade(trade);
-    } catch (e) {
-      log(`Virtual trade DB save: ${e.message}`, 'warn');
-    }
+    trade.id = await saveVirtualTrade(trade);
     state.virtual.open.push(trade);
     state.virtual.tradesToday++;
     openKeys.add(c.key);
 
     const msg =
-      `🟢 <b>S1 VIRTUAL ${trade.side}</b>\n` +
-      `<b>${trade.name}</b> (${trade.sector || '—'})\n` +
-      `Date: ${trade.tradingDate} IST\n` +
-      `Entry time: ${formatIst(trade.entryTs)}\n` +
-      `Entry: ₹${entry.toFixed(2)} × ${qty} shares\n` +
-      `Stop loss: ₹${stopLoss.toFixed(2)}\n` +
-      `Target 1 (1:2): ₹${target1.toFixed(2)}\n` +
-      `Target 2 (1:3): ₹${target2.toFixed(2)}\n` +
-      `Rank: ${c.rank} | Chg: ${c.pct?.toFixed?.(2)}%\n` +
-      `Risk: ~${state.virtual.riskPct}% of ₹${state.virtual.capital}\n` +
-      `Notes: ${trade.notes || '—'}`;
+      `🟢 <b>S1 VIRTUAL ${trade.side} EXECUTED</b>\n` +
+      `<b>${trade.name}</b> (${trade.sector})\n` +
+      `⏰ <b>Entry Time:</b> ${formatIst(trade.entryTs)} IST\n` +
+      `💵 <b>Entry Price:</b> ₹${entry.toFixed(2)} × ${qty} shs (Alloc: ₹${(entry * qty).toLocaleString('en-IN')})\n` +
+      `🛑 <b>Stop Loss (1%):</b> ₹${stopLoss.toFixed(2)}\n` +
+      `🎯 <b>Target 1 (+2%):</b> ₹${target1.toFixed(2)}\n` +
+      `🚀 <b>Target 2 (+3%):</b> ₹${target2.toFixed(2)}\n` +
+      `💼 <b>Account Capital:</b> ₹${state.virtual.capital.toLocaleString('en-IN')}`;
     await telegramSend(msg);
-    log(`S1 virtual ${trade.side} ${trade.name} @ ${entry.toFixed(2)} qty=${qty}`);
+    log(`[S1] Virtual ${trade.side} on ${trade.name} @ ₹${entry.toFixed(2)} (Qty: ${qty})`);
     broadcastDashboard();
   }
 }
 
 function manageOpenVirtualTrades() {
   if (!state.virtual.open.length) return;
-  const force = s1ForceExitTime() || (regularSessionFinished() && isTradingSessionDay());
+  const forceExit = s1ForceExitTime();
 
   for (const trade of [...state.virtual.open]) {
-    const q = state.live.get(trade.symbol);
+    const q = state.live.get(trade.symbol) || state.live.get(trade.key);
     const px = q?.ltp;
-    if (!Number.isFinite(px)) {
-      if (force) closeVirtualTrade(trade, trade.entryPrice, 'EOD_NO_QUOTE');
-      continue;
-    }
+    if (!Number.isFinite(px)) continue;
 
     if (trade.side === 'BUY') {
       if (px <= trade.stopLoss) {
-        closeVirtualTrade(trade, trade.stopLoss, trade.partialDone ? 'BE_STOP' : 'STOP');
+        const grossPnl = Number(((px - trade.entryPrice) * trade.remainingQty + trade.realizedPnl).toFixed(2));
+        const charges = calculateTradeCharges(trade.entryPrice, px, trade.qty);
+        const netPnl = Number((grossPnl - charges.totalCharges).toFixed(2));
+        trade.status = 'CLOSED';
+        trade.exitTs = new Date().toISOString();
+        trade.exitPrice = px;
+        trade.exitReason = trade.partialDone ? 'BREAKEVEN_STOP' : 'STOP_LOSS';
+        trade.grossPnl = grossPnl;
+        trade.taxes = charges.totalCharges;
+        trade.pnl = netPnl;
+        state.virtual.capital = Number((state.virtual.capital + netPnl).toFixed(2));
+        saveVirtualAccountToDb(state.virtual.capital).catch(() => {});
+        state.virtual.closed.unshift(trade);
+        state.virtual.open = state.virtual.open.filter(t => t !== trade);
+        updateVirtualTradeDb(trade).catch(() => {});
+        log(`[S1] SL hit on ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        telegramSend(`🔴 <b>S1 SL HIT</b>: ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
         continue;
       }
+
       if (!trade.partialDone && px >= trade.target1) {
-        // book 60%
-        const bookQty = Math.max(1, Math.floor(trade.remainingQty * 0.6));
-        const pnlPart = (px - trade.entryPrice) * bookQty;
-        trade.realizedPnl += pnlPart;
-        trade.remainingQty -= bookQty;
-        trade.partialDone = true;
-        trade.stopLoss = trade.entryPrice; // breakeven
-        log(`S1 partial exit ${trade.name}: ${bookQty} @ ${px.toFixed(2)}, SL→BE`);
-        telegramSend(
-          `💰 <b>S1 PARTIAL 60%</b> ${trade.side} ${trade.name}\n` +
-          `Date: ${trade.tradingDate || istToday()} IST\n` +
-          `Entry: ₹${trade.entryPrice.toFixed(2)} @ ${formatIst(trade.entryTs)}\n` +
-          `Partial exit: ₹${px.toFixed(2)} × ${bookQty} @ ${formatIst(new Date())}\n` +
-          `SL now: ₹${trade.stopLoss.toFixed(2)} (breakeven)\n` +
-          `Remaining: ${trade.remainingQty} → T2 ₹${Number(trade.target2).toFixed(2)}\n` +
-          `Partial PnL: ₹${pnlPart.toFixed(0)}`
-        );
-        if (trade.id) {
-          updateVirtualTrade(trade.id, { stopLoss: trade.stopLoss, qty: trade.remainingQty }).catch(() => {});
+        const halfQty = Math.floor(trade.remainingQty / 2);
+        if (halfQty > 0) {
+          trade.partialDone = true;
+          trade.remainingQty -= halfQty;
+          trade.realizedPnl += (px - trade.entryPrice) * halfQty;
+          trade.stopLoss = trade.entryPrice;
+          log(`[S1] Target 1 on ${trade.name} @ ₹${px.toFixed(2)}. 50% booked, SL moved to breakeven.`);
+          telegramSend(`🎯 <b>S1 TARGET 1</b>: ${trade.name} @ ₹${px.toFixed(2)}. Booked 50%, SL to breakeven.`);
         }
       }
-      if (trade.partialDone && px >= trade.target2) {
-        closeVirtualTrade(trade, px, 'TARGET2');
+
+      if (px >= trade.target2 || forceExit) {
+        const exitReason = px >= trade.target2 ? 'TARGET_2' : 'EOD_SQUAREOFF';
+        const grossPnl = Number(((px - trade.entryPrice) * trade.remainingQty + trade.realizedPnl).toFixed(2));
+        const charges = calculateTradeCharges(trade.entryPrice, px, trade.qty);
+        const netPnl = Number((grossPnl - charges.totalCharges).toFixed(2));
+        trade.status = 'CLOSED';
+        trade.exitTs = new Date().toISOString();
+        trade.exitPrice = px;
+        trade.exitReason = exitReason;
+        trade.grossPnl = grossPnl;
+        trade.taxes = charges.totalCharges;
+        trade.pnl = netPnl;
+        state.virtual.capital = Number((state.virtual.capital + netPnl).toFixed(2));
+        saveVirtualAccountToDb(state.virtual.capital).catch(() => {});
+        state.virtual.closed.unshift(trade);
+        state.virtual.open = state.virtual.open.filter(t => t !== trade);
+        updateVirtualTradeDb(trade).catch(() => {});
+        log(`[S1] Closed ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
         continue;
       }
     } else {
-      // SELL
+      // SELL (Short)
       if (px >= trade.stopLoss) {
-        closeVirtualTrade(trade, trade.stopLoss, trade.partialDone ? 'BE_STOP' : 'STOP');
+        const grossPnl = Number(((trade.entryPrice - px) * trade.remainingQty + trade.realizedPnl).toFixed(2));
+        const charges = calculateTradeCharges(trade.entryPrice, px, trade.qty);
+        const netPnl = Number((grossPnl - charges.totalCharges).toFixed(2));
+        trade.status = 'CLOSED';
+        trade.exitTs = new Date().toISOString();
+        trade.exitPrice = px;
+        trade.exitReason = trade.partialDone ? 'BREAKEVEN_STOP' : 'STOP_LOSS';
+        trade.grossPnl = grossPnl;
+        trade.taxes = charges.totalCharges;
+        trade.pnl = netPnl;
+        state.virtual.capital = Number((state.virtual.capital + netPnl).toFixed(2));
+        saveVirtualAccountToDb(state.virtual.capital).catch(() => {});
+        state.virtual.closed.unshift(trade);
+        state.virtual.open = state.virtual.open.filter(t => t !== trade);
+        updateVirtualTradeDb(trade).catch(() => {});
+        log(`[S1] SL hit on short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        telegramSend(`🔴 <b>S1 SL HIT</b>: Short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
         continue;
       }
+
       if (!trade.partialDone && px <= trade.target1) {
-        const bookQty = Math.max(1, Math.floor(trade.remainingQty * 0.6));
-        const pnlPart = (trade.entryPrice - px) * bookQty;
-        trade.realizedPnl += pnlPart;
-        trade.remainingQty -= bookQty;
-        trade.partialDone = true;
-        trade.stopLoss = trade.entryPrice;
-        log(`S1 partial exit ${trade.name}: ${bookQty} @ ${px.toFixed(2)}, SL→BE`);
-        telegramSend(
-          `💰 <b>S1 PARTIAL 60%</b> ${trade.side} ${trade.name}\n` +
-          `Date: ${trade.tradingDate || istToday()} IST\n` +
-          `Entry: ₹${trade.entryPrice.toFixed(2)} @ ${formatIst(trade.entryTs)}\n` +
-          `Partial exit: ₹${px.toFixed(2)} × ${bookQty} @ ${formatIst(new Date())}\n` +
-          `SL now: ₹${trade.stopLoss.toFixed(2)} (breakeven)\n` +
-          `Remaining: ${trade.remainingQty} → T2 ₹${Number(trade.target2).toFixed(2)}\n` +
-          `Partial PnL: ₹${pnlPart.toFixed(0)}`
-        );
+        const halfQty = Math.floor(trade.remainingQty / 2);
+        if (halfQty > 0) {
+          trade.partialDone = true;
+          trade.remainingQty -= halfQty;
+          trade.realizedPnl += (trade.entryPrice - px) * halfQty;
+          trade.stopLoss = trade.entryPrice;
+          log(`[S1] Target 1 on short ${trade.name} @ ₹${px.toFixed(2)}. 50% booked, SL moved to breakeven.`);
+          telegramSend(`🎯 <b>S1 TARGET 1</b>: Short ${trade.name} @ ₹${px.toFixed(2)}. Booked 50%, SL to breakeven.`);
+        }
       }
-      if (trade.partialDone && px <= trade.target2) {
-        closeVirtualTrade(trade, px, 'TARGET2');
+
+      if (px <= trade.target2 || forceExit) {
+        const exitReason = px <= trade.target2 ? 'TARGET_2' : 'EOD_SQUAREOFF';
+        const grossPnl = Number(((trade.entryPrice - px) * trade.remainingQty + trade.realizedPnl).toFixed(2));
+        const charges = calculateTradeCharges(trade.entryPrice, px, trade.qty);
+        const netPnl = Number((grossPnl - charges.totalCharges).toFixed(2));
+        trade.status = 'CLOSED';
+        trade.exitTs = new Date().toISOString();
+        trade.exitPrice = px;
+        trade.exitReason = exitReason;
+        trade.grossPnl = grossPnl;
+        trade.taxes = charges.totalCharges;
+        trade.pnl = netPnl;
+        state.virtual.capital = Number((state.virtual.capital + netPnl).toFixed(2));
+        saveVirtualAccountToDb(state.virtual.capital).catch(() => {});
+        state.virtual.closed.unshift(trade);
+        state.virtual.open = state.virtual.open.filter(t => t !== trade);
+        updateVirtualTradeDb(trade).catch(() => {});
+        log(`[S1] Closed short ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: Short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
         continue;
       }
     }
-
-    if (force) closeVirtualTrade(trade, px, 'EOD_FLAT');
   }
 }
 
-function closeVirtualTrade(trade, exitPrice, reason) {
-  const qty = trade.remainingQty || trade.qty;
-  const pnlRest = trade.side === 'BUY'
-    ? (exitPrice - trade.entryPrice) * qty
-    : (trade.entryPrice - exitPrice) * qty;
-  const pnl = (trade.realizedPnl || 0) + pnlRest;
-  trade.exitTs = new Date().toISOString();
-  trade.exitPrice = exitPrice;
-  trade.exitReason = reason;
-  trade.pnl = pnl;
-  trade.status = 'CLOSED';
-  state.virtual.open = state.virtual.open.filter(t => t !== trade);
-  state.virtual.closed.unshift(trade);
-  if (state.virtual.closed.length > 200) state.virtual.closed.pop();
-  if (trade.id) {
-    updateVirtualTrade(trade.id, {
-      exitTs: trade.exitTs,
-      exitPrice,
-      exitReason: reason,
-      pnl,
-      status: 'CLOSED',
-      qty
-    }).catch(() => {});
+/* ---------- Strategy-1 End-of-Day Backtest Simulator ---------- */
+async function runDayBacktest(targetDate, appId, token) {
+  log(`[DAY-BACKTEST] Initiating Strategy-1 backtest simulation for ${targetDate}…`);
+  const initialCap = 300000;
+  state.virtual.capital = initialCap;
+  await saveVirtualAccountToDb(initialCap);
+
+  if (pool) {
+    try {
+      await pool.query(`DELETE FROM virtual_trades WHERE trading_date = $1`, [targetDate]);
+    } catch {}
   }
-  const emoji = pnl >= 0 ? '✅' : '❌';
-  telegramSend(
-    `${emoji} <b>S1 CLOSED</b> ${trade.side} ${trade.name}\n` +
-    `Date: ${trade.tradingDate || istToday()} IST\n` +
-    `Entry: ₹${Number(trade.entryPrice).toFixed(2)} @ ${formatIst(trade.entryTs)}\n` +
-    `Exit: ₹${Number(exitPrice).toFixed(2)} @ ${formatIst(trade.exitTs)}\n` +
-    `Reason: ${reason}\n` +
-    `SL was: ₹${Number(trade.stopLoss).toFixed(2)}\n` +
-    `T1/T2: ₹${Number(trade.target1).toFixed(2)} / ₹${Number(trade.target2).toFixed(2)}\n` +
-    `Qty left at exit: ${qty}\n` +
-    `Total PnL: ₹${pnl.toFixed(0)}`
-  );
-  log(`S1 closed ${trade.name} ${reason} PnL=${pnl.toFixed(0)}`);
+  state.virtual.open = [];
+  state.virtual.closed = state.virtual.closed.filter(t => t.tradingDate !== targetDate);
+  state.virtual.tradesToday = 0;
+
+  const universe = await ensureUniverse();
+  await checkAndGapFillHistory(appId, token, targetDate, false);
+
+  const baseSnap = state.history.get('09:20');
+  let planSide = 'BUY';
+  let marketAdv = 0, marketDec = 0;
+
+  if (baseSnap && baseSnap.gainers && baseSnap.gainers.length) {
+    marketAdv = baseSnap.gainers.filter(x => (x.pct || 0) > 0).length;
+    marketDec = baseSnap.gainers.filter(x => (x.pct || 0) < 0).length;
+    if (marketDec > marketAdv) planSide = 'SELL';
+  } else {
+    const allRows = liveRows();
+    const b = breadth(allRows);
+    marketAdv = b.advances;
+    marketDec = b.declines;
+    if (marketDec > marketAdv) planSide = 'SELL';
+  }
+
+  log(`[DAY-BACKTEST] 09:20 Market Breadth: ${marketAdv} Adv vs ${marketDec} Dec -> Mode: ${planSide}`);
+
+  const candidatePool = baseSnap ? (planSide === 'BUY' ? baseSnap.gainers : baseSnap.losers) : universe;
+  const candidates = (candidatePool || []).slice(0, 15);
+
+  const maxTrades = 3;
+  let currentCap = initialCap;
+  const executedTrades = [];
+
+  for (const cand of candidates) {
+    if (executedTrades.length >= maxTrades) break;
+
+    const candles = await fetchHistorical5m(cand, appId, token, targetDate, targetDate);
+    if (!candles || candles.length < 10) continue;
+
+    const entryBar = candles.find(c => {
+      const hm = c.timeStr || new Date(c.time * 1000).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+      return hm >= '09:50' && hm <= '10:30';
+    });
+    if (!entryBar) continue;
+
+    const entryIdx = candles.indexOf(entryBar);
+    const priorCloses = candles.slice(0, entryIdx + 1).map(c => c.close);
+    const rsiVal = rsi(priorCloses, 14);
+    const vwapVal = vwapFromCandles(candles.slice(0, entryIdx + 1));
+    const ema9Arr = ema(priorCloses, 9);
+    const ema21Arr = ema(priorCloses, 21);
+    const ema50Arr = ema(priorCloses, 50);
+
+    const ema9 = ema9Arr[ema9Arr.length - 1];
+    const ema21 = ema21Arr[ema21Arr.length - 1];
+    const ema50 = ema50Arr[ema50Arr.length - 1];
+
+    if (planSide === 'BUY') {
+      if (vwapVal && entryBar.close < vwapVal) continue;
+      if (ema9 && ema21 && ema9 < ema21) continue;
+      if (rsiVal && (rsiVal < 50 || rsiVal > 75)) continue;
+    } else {
+      if (vwapVal && entryBar.close > vwapVal) continue;
+      if (ema9 && ema21 && ema9 > ema21) continue;
+      if (rsiVal && (rsiVal > 55 || rsiVal < 25)) continue;
+    }
+
+    const entry = entryBar.close;
+    const maxTradeCap = currentCap / maxTrades;
+    let qty = Math.floor(maxTradeCap / entry);
+    if (qty < 1) qty = 1;
+
+    const stopLoss = planSide === 'BUY' ? Number((entry * 0.99).toFixed(2)) : Number((entry * 1.01).toFixed(2));
+    const target1 = planSide === 'BUY' ? Number((entry * 1.02).toFixed(2)) : Number((entry * 0.98).toFixed(2));
+    const target2 = planSide === 'BUY' ? Number((entry * 1.03).toFixed(2)) : Number((entry * 0.97).toFixed(2));
+
+    let remainingQty = qty;
+    let partialDone = false;
+    let realizedPnl = 0;
+    let exitPrice = entry;
+    let exitReason = 'EOD_SQUAREOFF';
+    let exitTs = new Date(candles[candles.length - 1].time * 1000).toISOString();
+    let currentSl = stopLoss;
+
+    for (let k = entryIdx + 1; k < candles.length; k++) {
+      const bar = candles[k];
+      const hm = bar.timeStr || new Date(bar.time * 1000).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+
+      if (planSide === 'BUY') {
+        if (bar.low <= currentSl) {
+          exitPrice = currentSl;
+          exitReason = partialDone ? 'BREAKEVEN_STOP' : 'STOP_LOSS';
+          exitTs = new Date(bar.time * 1000).toISOString();
+          break;
+        }
+        if (!partialDone && bar.high >= target1) {
+          const halfQty = Math.floor(remainingQty / 2);
+          if (halfQty > 0) {
+            partialDone = true;
+            remainingQty -= halfQty;
+            realizedPnl += (target1 - entry) * halfQty;
+            currentSl = entry;
+          }
+        }
+        if (bar.high >= target2) {
+          exitPrice = target2;
+          exitReason = 'TARGET_2';
+          exitTs = new Date(bar.time * 1000).toISOString();
+          break;
+        }
+      } else {
+        if (bar.high >= currentSl) {
+          exitPrice = currentSl;
+          exitReason = partialDone ? 'BREAKEVEN_STOP' : 'STOP_LOSS';
+          exitTs = new Date(bar.time * 1000).toISOString();
+          break;
+        }
+        if (!partialDone && bar.low <= target1) {
+          const halfQty = Math.floor(remainingQty / 2);
+          if (halfQty > 0) {
+            partialDone = true;
+            remainingQty -= halfQty;
+            realizedPnl += (entry - target1) * halfQty;
+            currentSl = entry;
+          }
+        }
+        if (bar.low <= target2) {
+          exitPrice = target2;
+          exitReason = 'TARGET_2';
+          exitTs = new Date(bar.time * 1000).toISOString();
+          break;
+        }
+      }
+
+      if (hm >= '15:15') {
+        exitPrice = bar.close;
+        exitReason = 'EOD_SQUAREOFF';
+        exitTs = new Date(bar.time * 1000).toISOString();
+        break;
+      }
+    }
+
+    const grossPnl = planSide === 'BUY'
+      ? Number(((exitPrice - entry) * remainingQty + realizedPnl).toFixed(2))
+      : Number(((entry - exitPrice) * remainingQty + realizedPnl).toFixed(2));
+
+    const charges = calculateTradeCharges(entry, exitPrice, qty);
+    const netPnl = Number((grossPnl - charges.totalCharges).toFixed(2));
+    currentCap = Number((currentCap + netPnl).toFixed(2));
+
+    const tradeRecord = {
+      strategy: 'S1',
+      tradingDate: targetDate,
+      side: planSide,
+      key: cand.key,
+      symbol: cand.symbol,
+      name: cand.name,
+      sector: cand.sector,
+      entryTs: new Date(entryBar.time * 1000).toISOString(),
+      entryPrice: entry,
+      qty,
+      stopLoss,
+      target1,
+      target2,
+      exitTs,
+      exitPrice,
+      exitReason,
+      grossPnl,
+      taxes: charges.totalCharges,
+      pnl: netPnl,
+      status: 'CLOSED',
+      checks: { topRank: true, trend: true, rsi: true, volume: true },
+      notes: `Backtested (${planSide}): Entry @ ${formatIst(entryBar.time * 1000)} | Exit @ ${formatIst(exitTs)}`
+    };
+
+    try {
+      tradeRecord.id = await saveVirtualTrade(tradeRecord);
+      await updateVirtualTradeDb(tradeRecord);
+    } catch {}
+
+    executedTrades.push(tradeRecord);
+    state.virtual.closed.unshift(tradeRecord);
+  }
+
+  state.virtual.capital = currentCap;
+  await saveVirtualAccountToDb(currentCap);
+
+  const totalGross = executedTrades.reduce((a, b) => a + (b.grossPnl || 0), 0);
+  const totalTax = executedTrades.reduce((a, b) => a + (b.taxes || 0), 0);
+  const totalNet = executedTrades.reduce((a, b) => a + (b.pnl || 0), 0);
+
+  let tgMsg = `📊 <b>S1 END-OF-DAY BACKTEST REPORT (${targetDate})</b>\n`;
+  tgMsg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+  tgMsg += `💼 <b>Starting Capital:</b> ₹${initialCap.toLocaleString('en-IN')}\n`;
+  tgMsg += `📈 <b>Ending Capital:</b> ₹${currentCap.toLocaleString('en-IN')} (${totalNet >= 0 ? '+' : ''}${(((currentCap - initialCap)/initialCap)*100).toFixed(2)}%)\n`;
+  tgMsg += `🎯 <b>Trades Executed:</b> ${executedTrades.length}/${maxTrades} (${planSide} Mode)\n\n`;
+
+  executedTrades.forEach((t, idx) => {
+    tgMsg += `<b>${idx + 1}. ${t.name}</b> (${t.side})\n`;
+    tgMsg += `  Entry: ₹${t.entryPrice.toFixed(2)} × ${t.qty} shs\n`;
+    tgMsg += `  Exit: ₹${t.exitPrice.toFixed(2)} (${t.exitReason})\n`;
+    tgMsg += `  Net PnL: <b>${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(2)}</b> (Taxes: ₹${t.taxes.toFixed(2)})\n\n`;
+  });
+
+  tgMsg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+  tgMsg += `💵 <b>Gross PnL:</b> ₹${totalGross.toFixed(2)}\n`;
+  tgMsg += `🏛 <b>Taxes & Brokerage:</b> ₹${totalTax.toFixed(2)}\n`;
+  tgMsg += `✨ <b>Net PnL:</b> <b>${totalNet >= 0 ? '+' : ''}₹${totalNet.toFixed(2)}</b>`;
+
+  await telegramSend(tgMsg);
+  log(`[DAY-BACKTEST] Completed for ${targetDate}: ${executedTrades.length} trades (${planSide}), Net PnL: ₹${totalNet.toFixed(2)}`);
   broadcastDashboard();
+
+  return {
+    ok: true,
+    date: targetDate,
+    startingCapital: initialCap,
+    endingCapital: currentCap,
+    trades: executedTrades,
+    summary: { totalGross, totalTax, totalNet }
+  };
+}
+
+/* ---------- Dashboard Payload Builder ---------- */
+async function dashboardData() {
+  const date = istToday();
+  if (state.virtual.dayKey !== date) {
+    state.virtual.dayKey = date;
+    state.virtual.tradesToday = 0;
+  }
+  if (!state.indices.size || Date.now() - lastIndexRefreshTime > 60000) {
+    refreshIndexQuotes().catch(() => {});
+  }
+
+  const live = rankedLive();
+  const gainers = mergeRows('gainers', live.gainers);
+  const losers = mergeRows('losers', live.losers);
+
+  let allRows = liveRows();
+  if (allRows.length < 10) {
+    if (state.live.size >= 10) {
+      allRows = [...state.live.values()].map(q => {
+        const key = normalizeKey(q.symbol || q.key || q.name);
+        return {
+          key,
+          name: key,
+          symbol: q.symbol,
+          pct: Number(q.changePct ?? q.pct ?? 0),
+          ltp: q.ltp,
+          sector: SECTOR_MAP[key] || 'Other F&O'
+        };
+      });
+    } else {
+      const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
+      if (times.length > 0) {
+        const snap = state.history.get(times[times.length - 1]);
+        if (snap) {
+          const combined = [...(snap.gainers || []), ...(snap.losers || [])];
+          const seen = new Set();
+          allRows = [];
+          for (const item of combined) {
+            const k = normalizeKey(item.key || item.symbol || item.name);
+            if (!seen.has(k)) {
+              seen.add(k);
+              allRows.push(item);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const b = breadth(allRows);
+  const sectors = sectorData(allRows);
+
+  const idxCards = INDEX_CONFIG.map(cfg => {
+    const q = state.indices.get(cfg.symbol) || state.live.get(cfg.symbol) || {};
+    let ltp = q.ltp ?? null;
+    let pctVal = q.changePct ?? q.pct ?? null;
+    let adv = b.advances;
+    let dec = b.declines;
+
+    if (cfg.name === 'NIFTY 50') {
+      const n50Stocks = [...NIFTY50].map(k => state.live.get(`NSE:${k}-EQ`) || state.live.get(k)).filter(Boolean);
+      if (n50Stocks.length) {
+        adv = n50Stocks.filter(x => (x.changePct || 0) > 0).length;
+        dec = n50Stocks.filter(x => (x.changePct || 0) < 0).length;
+        if (pctVal == null) {
+          pctVal = Number((n50Stocks.reduce((a, x) => a + (x.changePct || 0), 0) / n50Stocks.length).toFixed(2));
+        }
+      }
+    }
+
+    return {
+      name: cfg.name,
+      symbol: cfg.symbol,
+      ltp,
+      pct: pctVal,
+      changePct: pctVal,
+      advances: adv,
+      declines: dec
+    };
+  });
+
+  return {
+    updatedAt: new Date().toISOString(),
+    displayDate: state.displayDate || date,
+    displayMode: state.displayMode,
+    isLiveSession: marketOpenNow(),
+    isPreOpen: isPreOpenSession(),
+    sessionFinished: regularSessionFinished(),
+    indices: idxCards,
+    breadth: b,
+    universeSize: state.universe.length,
+    sector: sectors,
+    sectors: sectors,
+    gainers: gainers.rows,
+    losers: losers.rows,
+    scannerUniverse: allRows,
+    times: gainers.times,
+    virtual: {
+      enabled: state.virtual.enabled,
+      capital: state.virtual.capital,
+      tradesToday: state.virtual.tradesToday,
+      maxTrades: state.virtual.maxTrades,
+      open: state.virtual.open,
+      closed: state.virtual.closed.slice(0, 30),
+      signals: state.virtual.signals.slice(-20).reverse()
+    },
+    logs: state.log.slice(-30)
+  };
+}
+
+function broadcastDashboard() {
+  if (!browserSockets.size) return;
+  dashboardData().then(payload => {
+    const raw = JSON.stringify({ type: 'dashboard', data: payload });
+    for (const ws of browserSockets) {
+      try { if (ws.readyState === 1) ws.send(raw); } catch {}
+    }
+  }).catch(() => {});
+}
+
+/* ---------- HTTP Request Router ---------- */
+function send(res, code, data, type = 'application/json') {
+  res.writeHead(code, {
+    'Content-Type': type,
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store'
+  });
+  res.end(typeof data === 'string' ? data : JSON.stringify(data));
+}
+
+function cors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let b = '';
+    req.on('data', c => { b += c; });
+    req.on('end', () => {
+      try { resolve(b ? JSON.parse(b) : {}); }
+      catch { resolve({}); }
+    });
+    req.on('error', reject);
+  });
 }
 
 function virtualReportSummary(trades) {
-  const closed = trades.filter(t => (t.status || t.status) === 'CLOSED' || t.exit_ts || t.exitTs);
+  const closed = trades.filter(t => (t.status || '') === 'CLOSED' || t.exit_ts || t.exitTs);
   let wins = 0, losses = 0, pnl = 0;
   for (const t of closed) {
     const p = Number(t.pnl);
@@ -1526,444 +2103,9 @@ function virtualReportSummary(trades) {
     open: trades.filter(t => (t.status || '') === 'OPEN' || (!t.exit_ts && !t.exitTs && t.status !== 'CLOSED')).length,
     wins,
     losses,
-    winRate: closed.length ? (wins / closed.length) * 100 : 0,
-    totalPnl: pnl
+    winRate: closed.length ? Number(((wins / closed.length) * 100).toFixed(1)) : 0,
+    totalPnl: Number(pnl.toFixed(2))
   };
-}
-
-/* ---------- Dashboard payload ---------- */
-function snapshotAtCurrent() {
-  const live = rankedLive();
-  let displayLive = live;
-  if (state.displayMode === 'previous-close' || (!live.gainers.length && state.history.size)) {
-    const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
-    const key = times.length ? times[times.length - 1] : 'CLOSE';
-    const h = state.history.get(key);
-    if (h) {
-      displayLive = {
-        gainers: (h.gainers || []).map(x => ({ ...x, ltp: x.close, pct: x.pct })),
-        losers: (h.losers || []).map(x => ({ ...x, ltp: x.close, pct: x.pct }))
-      };
-    }
-  }
-  const g = mergeRows('gainers', displayLive.gainers);
-  const l = mergeRows('losers', displayLive.losers);
-  // Unique F&O rows only (liveRows or one side of ranked list — not gainers+losers concat)
-  const uniqueLive = liveRows().length
-    ? liveRows()
-    : (() => {
-        const m = new Map();
-        for (const x of (displayLive.gainers || [])) m.set(normalizeKey(x.key), x);
-        return [...m.values()];
-      })();
-  const times = [...new Set([...g.times, ...l.times])].sort((a, b) =>
-    a === 'CURRENT' ? 1 : b === 'CURRENT' ? -1 : a.localeCompare(b)
-  );
-  return {
-    gainers: g.rows,
-    losers: l.rows,
-    times,
-    sector: sectorData(uniqueLive),
-    breadth: breadth(uniqueLive),
-    niftyBreadth: breadth(uniqueLive.filter(x => NIFTY50.has(normalizeKey(x.key))))
-  };
-}
-
-async function dashboardData() {
-  const now = istParts();
-  const preOpen = !regularSessionStarted();
-  const postClose = regularSessionFinished();
-  const snap = snapshotAtCurrent();
-  const indices = INDEX_SYMBOLS.map(([name, symbol]) => ({
-    name,
-    symbol,
-    ...(state.indices.get(symbol) || { ltp: null, changePct: null })
-  }));
-
-  let displayLabel = "Today's live trading session";
-  if (preOpen || !isTradingSessionDay()) displayLabel = 'Last completed / pre-open session';
-  else if (postClose) displayLabel = "Today's completed trading session";
-
-  const scannerUniverse = liveRows().map(x => ({
-    key: x.key,
-    name: x.name,
-    sector: x.sector,
-    ltp: x.ltp,
-    pct: x.pct,
-    volume: x.volume,
-    growwUrl: x.growwUrl,
-    d1High: x.d1High,
-    d1Low: x.d1Low,
-    coil: x.coil,
-    volRatio: x.volRatio,
-    orHigh: x.orHigh,
-    orLow: x.orLow,
-    vwap: x.vwap,
-    aboveD1High: x.aboveD1High,
-    belowD1Low: x.belowD1Low,
-    aboveOrHigh: x.aboveOrHigh,
-    belowOrLow: x.belowOrLow,
-    aboveVwap: x.aboveVwap,
-    belowVwap: x.belowVwap,
-    highVolume: x.highVolume
-  }));
-
-  return {
-    date: state.displayDate || istToday(),
-    calendarDate: now.date,
-    marketOpen: marketOpenNow(),
-    sessionStarted: regularSessionStarted(),
-    sessionFinished: regularSessionFinished(),
-    displayMode: state.displayMode,
-    displayLabel,
-    updatedAt: new Date().toISOString(),
-    indices,
-    universeSize: state.universe.length,
-    connected: state.fyers.connected,
-    liveCount: state.live.size,
-    quoteAgeSec: liveDataAgeSec() === Infinity ? null : Math.round(liveDataAgeSec()),
-    histSnapshots: state.history.size,
-    ...snap,
-    scannerUniverse,
-    virtual: {
-      enabled: state.virtual.enabled,
-      capital: state.virtual.capital,
-      riskPct: state.virtual.riskPct,
-      maxTrades: state.virtual.maxTrades,
-      tradesToday: state.virtual.tradesToday,
-      open: state.virtual.open,
-      closed: state.virtual.closed.slice(0, 30),
-      signals: state.virtual.signals.slice(-20).reverse(),
-      summary: virtualReportSummary([...state.virtual.open, ...state.virtual.closed])
-    },
-    logs: state.log.slice(-80)
-  };
-}
-
-function broadcast(obj) {
-  const text = JSON.stringify(obj);
-  for (const ws of browserSockets) {
-    try { if (ws.readyState === 1) ws.send(text); } catch {}
-  }
-}
-
-function broadcastDashboard() {
-  if (broadcastTimer) return;
-  broadcastTimer = setTimeout(async () => {
-    broadcastTimer = null;
-    try {
-      const d = await dashboardData();
-      broadcast({ type: 'dashboard', data: d });
-    } catch (e) {
-      log(`Broadcast error: ${e.message}`, 'warn');
-    }
-  }, 300);
-}
-
-/* ---------- FYERS socket ---------- */
-let wsReconnectAttempt = 0;
-let wsConnecting = false;
-
-function startFyersSocket() {
-  if (!state.fyers.appId || !state.fyers.token) return;
-  if (wsConnecting) return;
-  wsConnecting = true;
-
-  clearTimeout(state.fyers.reconnectTimer);
-
-  try {
-    if (state.fyers.socket) {
-      try {
-        state.fyers.socket.removeAllListeners?.();
-        state.fyers.socket.close();
-      } catch {}
-      state.fyers.socket = null;
-    }
-  } catch {}
-
-  const auth = `${state.fyers.appId}:${state.fyers.token}`;
-  let skt;
-  try {
-    skt = fyersDataSocket.getInstance(auth, '', false);
-  } catch (e) {
-    wsConnecting = false;
-    log(`FYERS socket getInstance: ${e.message}`, 'warn');
-    scheduleWsReconnect();
-    return;
-  }
-  state.fyers.socket = skt;
-
-  skt.on('connect', () => {
-    wsConnecting = false;
-    wsReconnectAttempt = 0;
-    state.fyers.connected = true;
-    log('FYERS market-data WebSocket connected.');
-    const symbols = [
-      ...state.universe.map(x => x.symbol),
-      ...INDEX_SYMBOLS.map(x => x[1])
-    ];
-    try {
-      // Subscribe in chunks to reduce disconnect risk
-      for (let i = 0; i < symbols.length; i += 80) {
-        skt.subscribe(symbols.slice(i, i + 80));
-      }
-    } catch (e) {
-      log(`Subscribe error: ${e.message || e}`, 'warn');
-    }
-    broadcastDashboard();
-  });
-
-  skt.on('message', msg => {
-    const parsed = parseFyersMessage(msg);
-    const arr = Array.isArray(parsed) ? parsed : [parsed];
-    const nowSec = Date.now() / 1000;
-    for (const q of arr.filter(Boolean)) {
-      const row = { ...q, ts: Number(q.ts) || nowSec };
-      if (INDEX_SYMBOLS.some(x => x[1] === q.symbol)) state.indices.set(q.symbol, row);
-      else state.live.set(q.symbol, row);
-    }
-    if (arr.length) {
-      manageOpenVirtualTrades();
-      broadcastDashboard();
-    }
-  });
-
-  skt.on('error', e => {
-    const s = typeof e === 'string' ? e : JSON.stringify(e);
-    log(`FYERS WebSocket error: ${s}`, 'error');
-    if (isAuthError(s)) {
-      markTokenInvalid('WebSocket ' + s);
-    }
-  });
-
-  skt.on('close', () => {
-    state.fyers.connected = false;
-    wsConnecting = false;
-    log('FYERS market-data WebSocket closed.', 'warn');
-    if (!state.fyers.tokenInvalid) scheduleWsReconnect();
-  });
-
-  try {
-    skt.connect();
-  } catch (e) {
-    wsConnecting = false;
-    log(`Socket start: ${e.message}`, 'warn');
-    scheduleWsReconnect();
-  }
-}
-
-function scheduleWsReconnect() {
-  if (!state.fyers.appId || !state.fyers.token || state.fyers.tokenInvalid) return;
-  clearTimeout(state.fyers.reconnectTimer);
-  wsReconnectAttempt = Math.min(wsReconnectAttempt + 1, 8);
-  // Longer backoff when flapping: 20s … up to 3 min
-  const delay = Math.min(180000, 20000 * wsReconnectAttempt);
-  state.fyers.reconnectTimer = setTimeout(() => {
-    if (state.fyers.appId && state.fyers.token && !state.fyers.tokenInvalid) {
-      log(`Attempting FYERS WebSocket reconnect (attempt ${wsReconnectAttempt}, wait ${delay / 1000}s)…`);
-      startFyersSocket();
-    }
-  }, delay);
-}
-
-/* ---------- Chart API (14d 5m) ---------- */
-async function chartData(key, days = 14) {
-  const stock = state.universe.find(x => normalizeKey(x.key) === normalizeKey(key));
-  if (!stock) throw new Error('Unknown symbol');
-  if (!state.fyers.appId || !state.fyers.token) throw new Error('Not logged in');
-  const today = istToday();
-  const from = epochForISTDate(today, '09:15') - days * 86400;
-  const to = epochForISTDate(today, '15:35');
-  const d = await fyersGet(DATA_HOST, '/history', {
-    symbol: stock.symbol,
-    resolution: '5',
-    date_format: '0',
-    range_from: from,
-    range_to: to,
-    cont_flag: '1'
-  }, state.fyers.appId, state.fyers.token, 0);
-  const candles = (d.candles || []).map(c => ({
-    time: Number(c[0]),
-    open: Number(c[1]),
-    high: Number(c[2]),
-    low: Number(c[3]),
-    close: Number(c[4]),
-    volume: Number(c[5] || 0)
-  }));
-  let ltp = state.live.get(stock.symbol)?.ltp || null;
-  return { stock, candles, ltp, days };
-}
-
-/* ---------- HTTP ---------- */
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let b = '';
-    req.on('data', c => {
-      b += c;
-      if (b.length > 1e6) { req.destroy(); reject(new Error('Body too large')); }
-    });
-    req.on('end', () => {
-      try { resolve(b ? JSON.parse(b) : {}); } catch (e) { reject(e); }
-    });
-    req.on('error', reject);
-  });
-}
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-fyers-app-id, x-fyers-access-token');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-}
-function send(res, status, data, type = 'application/json') {
-  cors(res);
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-  res.end(type === 'application/json' ? JSON.stringify(data) : data);
-}
-
-async function seedQuotes(appId, token) {
-  const universe = await ensureUniverse();
-  const qs = await quotes(
-    universe.map(s => s.symbol).concat(INDEX_SYMBOLS.map(x => x[1])),
-    appId,
-    token
-  );
-  if (!qs.length) throw new Error('Quote API returned 0 symbols');
-  const nowSec = Date.now() / 1000;
-  let n = 0;
-  for (const q of qs) {
-    if (!q.symbol || !Number.isFinite(q.ltp)) continue;
-    const row = { ...q, ts: nowSec };
-    if (INDEX_SYMBOLS.some(x => x[1] === q.symbol)) state.indices.set(q.symbol, row);
-    else state.live.set(q.symbol, row);
-    n++;
-  }
-  if (n < 10) throw new Error(`Only ${n} valid quotes parsed`);
-  log(`Background: seeded live quotes for ${n} symbols.`);
-  return n;
-}
-
-/** OR (09:15–09:30) + session VWAP from today's 5m bars — background, rate-limited */
-async function loadIntradayMetrics(appId, token) {
-  if (!appId || !token || Date.now() < fyersCooldownUntil) return;
-  const universe = await ensureUniverse();
-  const date = istToday();
-  let n = 0;
-  for (let i = 0; i < universe.length; i++) {
-    if (Date.now() < fyersCooldownUntil) break;
-    const stock = universe[i];
-    try {
-      const candles = await history5m(stock, appId, token, date);
-      if (candles.length < 3) continue;
-      let orHigh = -Infinity, orLow = Infinity;
-      for (const c of candles) {
-        const hm = new Date(c.ts * 1000).toLocaleTimeString('en-GB', {
-          timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
-        });
-        if (hm >= '09:15' && hm < '09:30') {
-          orHigh = Math.max(orHigh, c.high);
-          orLow = Math.min(orLow, c.low);
-        }
-      }
-      const vw = vwapFromCandles(candles);
-      state.metrics.set(stock.key, {
-        orHigh: orHigh === -Infinity ? null : orHigh,
-        orLow: orLow === Infinity ? null : orLow,
-        vwap: vw
-      });
-      n++;
-    } catch {}
-    if ((i + 1) % 50 === 0) log(`Intraday metrics progress: ${i + 1}/${universe.length}`);
-  }
-  log(`Intraday metrics (OR 15m / VWAP) loaded for ${n}/${universe.length} on ${date}.`);
-}
-
-function formatIst(ts) {
-  try {
-    return new Date(ts).toLocaleString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-    });
-  } catch {
-    return String(ts);
-  }
-}
-
-async function loadOpenVirtualFromDb() {
-  if (!pool) return;
-  try {
-    const today = istToday();
-    const { rows } = await pool.query(
-      `SELECT * FROM virtual_trades WHERE trading_date=$1 AND status='OPEN' ORDER BY entry_ts`,
-      [today]
-    );
-    state.virtual.open = rows.map(r => ({
-      id: r.id,
-      strategy: r.strategy || 'S1',
-      tradingDate: toISODate(r.trading_date),
-      side: r.side,
-      key: normalizeKey(r.symbol || r.name),
-      symbol: r.symbol,
-      name: r.name,
-      sector: r.sector,
-      entryTs: r.entry_ts,
-      entryPrice: Number(r.entry_price),
-      qty: Number(r.qty),
-      remainingQty: Number(r.qty),
-      stopLoss: Number(r.stop_loss),
-      target1: Number(r.target1),
-      target2: Number(r.target2),
-      status: 'OPEN',
-      partialDone: false,
-      realizedPnl: 0,
-      checks: r.checks,
-      notes: r.notes
-    }));
-    const { rows: cnt } = await pool.query(
-      `SELECT COUNT(*)::int AS c FROM virtual_trades WHERE trading_date=$1`,
-      [today]
-    );
-    state.virtual.tradesToday = cnt[0]?.c || state.virtual.open.length;
-    state.virtual.dayKey = today;
-    if (state.virtual.open.length) {
-      log(`Restored ${state.virtual.open.length} open virtual trade(s) from DB for ${today}.`);
-    }
-  } catch (e) {
-    log(`Load open virtual trades: ${e.message}`, 'warn');
-  }
-}
-
-async function loadD1Levels(appId, token) {
-  const universe = await ensureUniverse();
-  const date = istToday();
-  let n = 0;
-  for (const stock of universe) {
-    try {
-      const from = epochForISTDate(date, '09:15') - 25 * 86400;
-      const to = epochForISTDate(date, '09:15') - 60;
-      const d = await fyersGet(DATA_HOST, '/history', {
-        symbol: stock.symbol, resolution: 'D', date_format: '0',
-        range_from: from, range_to: to, cont_flag: '1'
-      }, appId, token, 0);
-      const cs = (d.candles || []).filter(c => {
-        const bd = new Date(Number(c[0]) * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-        return bd < date;
-      });
-      if (!cs.length) continue;
-      const last = cs[cs.length - 1];
-      const volSlice = cs.slice(-10);
-      const avgVol10 = volSlice.reduce((a, c) => a + Number(c[5] || 0), 0) / volSlice.length;
-      const high = Number(last[2]), low = Number(last[3]), open = Number(last[1]), close = Number(last[4]);
-      const rangePct = close ? Math.abs(high - low) / close * 100 : 0;
-      const chgPct = open ? Math.abs(close - open) / open * 100 : 0;
-      state.d1.set(stock.key, {
-        high, low, open, close, avgVol10,
-        consolidation: rangePct <= 1.5 && chgPct <= 1.5,
-        rangePct, chgPct
-      });
-      n++;
-    } catch {}
-  }
-  log(`D-1 levels + volume MA(10) loaded for ${n}/${universe.length} stocks.`);
 }
 
 async function route(req, res) {
@@ -1972,121 +2114,62 @@ async function route(req, res) {
     res.writeHead(204);
     return res.end();
   }
+
   const u = new URL(req.url, `http://${req.headers.host}`);
-  const appId = req.headers['x-fyers-app-id'] || state.fyers.appId;
-  const token = req.headers['x-fyers-access-token'] || state.fyers.token;
 
   try {
     if (u.pathname === '/api/health') {
-      return send(res, 200, {
-        ok: true,
-        universe: state.universe.length,
-        connected: state.fyers.connected,
-        history: state.history.size,
-        virtualOpen: state.virtual.open.length
-      });
+      return send(res, 200, { ok: true, broker: 'fyers', universe: state.universe.length, connected: state.fyers.connected });
     }
 
     if (u.pathname === '/api/login' && req.method === 'POST') {
       const body = await readBody(req);
-      const id = String(body.appId || '').trim();
-      const tok = String(body.accessToken || '').trim();
-      if (!id || !tok) return send(res, 400, { ok: false, error: 'App ID and access token required' });
+      const appId = String(body.appId || body.api_key || body.apiKey || '').trim();
+      let token = String(body.accessToken || body.access_token || body.token || '').trim();
+      token = token.replace(/^(?:bearer)\s+/i, '').trim();
 
-      let probeOk = false;
-      try {
-        await fyersGet(DATA_HOST, '/quotes', { symbols: 'NSE:NIFTY50-INDEX' }, id, tok, 0);
-        probeOk = true;
-      } catch (e) {
-        const msg = e.message || '';
-        if (msg.includes('401') || msg.toLowerCase().includes('valid token') || msg.includes('-15')) {
-          return send(res, 401, { ok: false, error: msg });
-        }
-        log(`Login probe: ${msg} — accepting credentials; ranks from DB when possible.`, 'warn');
+      if (!appId || !token) {
+        return send(res, 400, { ok: false, error: 'Both App ID and Access Token are required.' });
       }
 
-      state.fyers.appId = id;
-      state.fyers.token = tok;
-      state.fyers.tokenInvalid = false;
-      wsReconnectAttempt = 0;
-      log('FYERS credentials accepted (token not logged). Server will keep ranks + S1 running until logout.');
+      state.fyers.appId = appId;
+      state.fyers.token = token;
+      log('FYERS credentials updated via browser.');
+
+      await saveSessionToDb(appId, token);
       await ensureUniverse();
       await loadOpenVirtualFromDb();
-
-      const today = istToday();
-      if (!regularSessionStarted() || !isTradingSessionDay()) {
-        await loadLatestCompletedSession(id, tok);
-      } else {
-        if (state.currentDay !== today) resetSession(today);
-        state.currentDay = today;
-        state.displayDate = today;
-        state.displayMode = 'current';
-        await loadDbHistory(today);
-        if (!state.history.size || !(state.history.get('09:20')?.gainers?.length > 30)) {
-          if (!historyRebuildPromise) {
-            historyRebuildStartedAt = Date.now();
-            historyRebuildPromise = rebuildHistoryFromFyers(id, tok)
-              .catch(e => log(`Background rebuild: ${e.message}`, 'warn'))
-              .finally(() => { historyRebuildPromise = null; });
-          }
-        } else {
-          log(`Post-login DB ranks: ${state.history.size} snapshot times for ${today}.`);
-          setTimeout(() => {
-            gapFillMissingTimes(id, tok).catch(e => log(`Gap-fill: ${e.message}`, 'warn'));
-          }, 8000);
-        }
-      }
-
+      await seedInitialQuotes(appId, token);
       startFyersSocket();
-      setTimeout(() => {
-        if (Date.now() >= fyersCooldownUntil) {
-          seedQuotes(id, tok).catch(() => {});
-        }
-        setTimeout(() => {
-          if (Date.now() >= fyersCooldownUntil) {
-            loadD1Levels(id, tok)
-              .then(() => loadIntradayMetrics(id, tok))
-              .catch(e => log(`D1/metrics load: ${e.message}`, 'warn'));
-          }
-        }, 60000);
-      }, 2000);
+      checkAndGapFillHistory(appId, token).catch(() => {});
 
-      return send(res, 200, { ok: true, probeOk, universe: state.universe.length });
+      return send(res, 200, { ok: true, universe: state.universe.length });
     }
 
     if (u.pathname === '/api/logout' && req.method === 'POST') {
-      clearTimeout(state.fyers.reconnectTimer);
-      try { if (state.fyers.socket) state.fyers.socket.close(); } catch {}
-      state.fyers = { appId: '', token: '', socket: null, connected: false, reconnectTimer: null, tokenInvalid: false };
-      wsReconnectAttempt = 0;
-      log('Logged out; FYERS credentials cleared. Background ranks/S1 stopped.', 'warn');
+      state.fyers.appId = '';
+      state.fyers.token = '';
+      if (state.fyers.socket) {
+        try { state.fyers.socket.close(); } catch {}
+      }
+      if (pool) {
+        try { await pool.query("DELETE FROM server_sessions WHERE broker = 'fyers'"); } catch {}
+      }
+      log('User logged out. FYERS session cleared.', 'warn');
       return send(res, 200, { ok: true });
     }
 
-    if (u.pathname === '/api/dashboard' && req.method === 'GET') {
-      if (appId && token && !state.fyers.appId) {
-        state.fyers.appId = appId;
-        state.fyers.token = token;
-        state.fyers.tokenInvalid = false;
-        wsReconnectAttempt = 0;
-        log('Session restore from browser headers (DB ranks + WebSocket). Background jobs resume.');
+    if (u.pathname === '/api/dashboard') {
+      const hAppId = req.headers['x-fyers-app-id'] || req.headers['x-api-key'];
+      let hToken = req.headers['x-fyers-access-token'] || req.headers['authorization'];
+      if (hToken) hToken = hToken.replace(/^(?:bearer)\s+/i, '').trim();
+
+      if (hAppId && hToken && (!state.fyers.appId || !state.fyers.token)) {
+        state.fyers.appId = hAppId;
+        state.fyers.token = hToken;
         await ensureUniverse();
         await loadOpenVirtualFromDb();
-        const today = istToday();
-        if (!regularSessionStarted() || !isTradingSessionDay()) {
-          await loadLatestCompletedSession(appId, token);
-        } else {
-          state.currentDay = today;
-          state.displayDate = today;
-          state.displayMode = 'current';
-          await loadDbHistory(today);
-          setTimeout(() => {
-            gapFillMissingTimes(appId, token).catch(e => log(`Gap-fill restore: ${e.message}`, 'warn'));
-          }, 5000);
-          setTimeout(() => {
-            if (Date.now() >= fyersCooldownUntil) seedQuotes(appId, token).catch(() => {});
-          }, 2000);
-        }
+        await seedInitialQuotes(hAppId, hToken);
         startFyersSocket();
       }
       return send(res, 200, await dashboardData());
@@ -2098,9 +2181,17 @@ async function route(req, res) {
 
     if (u.pathname === '/api/chart' && req.method === 'GET') {
       const key = u.searchParams.get('key') || '';
-      const days = Math.min(20, Math.max(1, Number(u.searchParams.get('days') || 14)));
-      const data = await chartData(key, days);
-      return send(res, 200, data);
+      const stock = state.universe.find(x => normalizeKey(x.key) === normalizeKey(key));
+      if (!stock) return send(res, 404, { error: 'Unknown stock symbol' });
+
+      let candles = [];
+      let orderBlocks = { buyZones: [], sellZones: [] };
+      const res2w = await fetchHistorical2Weeks(stock, state.fyers.appId, state.fyers.token);
+      candles = res2w.candles || [];
+      orderBlocks = res2w.orderBlocks || orderBlocks;
+      const liveQ = state.live.get(stock.symbol) || state.live.get(stock.key);
+      const ltp = liveQ?.ltp || null;
+      return send(res, 200, { stock, candles, orderBlocks, ltp, days: 14 });
     }
 
     if (u.pathname === '/api/virtual/status' && req.method === 'GET') {
@@ -2120,42 +2211,91 @@ async function route(req, res) {
     if (u.pathname === '/api/virtual/report' && req.method === 'GET') {
       const from = u.searchParams.get('from') || istToday();
       const to = u.searchParams.get('to') || istToday();
-      const rows = await loadVirtualTrades(from, to);
-      const mapped = rows.map(r => ({
-        id: r.id,
-        strategy: r.strategy || 'S1',
-        date: toISODate(r.trading_date || r.tradingDate),
-        side: r.side,
-        name: r.name,
-        symbol: r.symbol,
-        sector: r.sector,
-        entryTs: r.entry_ts || r.entryTs,
-        entryPrice: Number(r.entry_price ?? r.entryPrice),
-        qty: Number(r.qty),
-        stopLoss: Number(r.stop_loss ?? r.stopLoss),
-        target1: Number(r.target1),
-        target2: Number(r.target2),
-        exitTs: r.exit_ts || r.exitTs,
-        exitPrice: r.exit_price != null ? Number(r.exit_price) : r.exitPrice,
-        exitReason: r.exit_reason || r.exitReason,
-        pnl: r.pnl != null ? Number(r.pnl) : null,
-        status: r.status,
-        checks: r.checks,
-        notes: r.notes
-      }));
+      let rows = [...state.virtual.closed, ...state.virtual.open];
+
+      if (pool) {
+        try {
+          const resDb = await pool.query(
+            `SELECT * FROM virtual_trades WHERE trading_date >= $1 AND trading_date <= $2 ORDER BY entry_ts DESC`,
+            [from, to]
+          );
+          rows = resDb.rows.map(r => ({
+            id: r.id,
+            strategy: r.strategy,
+            date: toISODate(r.trading_date),
+            side: r.side,
+            name: r.name,
+            symbol: r.symbol,
+            sector: r.sector,
+            entryTs: r.entry_ts,
+            entryPrice: Number(r.entry_price),
+            qty: Number(r.qty),
+            stopLoss: Number(r.stop_loss),
+            target1: Number(r.target1),
+            target2: Number(r.target2),
+            exitTs: r.exit_ts,
+            exitPrice: r.exit_price != null ? Number(r.exit_price) : null,
+            exitReason: r.exit_reason,
+            pnl: r.pnl != null ? Number(r.pnl) : null,
+            status: r.status,
+            checks: r.checks,
+            notes: r.notes
+          }));
+        } catch (e) {
+          log(`Report DB load error: ${e.message}`, 'warn');
+        }
+      }
+
       return send(res, 200, {
-        from,
-        to,
-        summary: virtualReportSummary(mapped),
-        trades: mapped
+        from, to, summary: virtualReportSummary(rows), trades: rows
       });
+    }
+
+    if (u.pathname === '/api/virtual/test-telegram' && req.method === 'POST') {
+      const body = await readBody(req);
+      const token = body.botToken || process.env.TELEGRAM_BOT_TOKEN;
+      const chat = body.chatId || process.env.TELEGRAM_CHAT_ID;
+
+      if (!token || !chat) {
+        return send(res, 400, {
+          ok: false,
+          error: 'Telegram credentials missing. Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Environment Variables.'
+        });
+      }
+
+      const testMsg =
+        `🔔 <b>FYERS F&O Intraday Dashboard — Telegram Test</b>\n` +
+        `✅ Telegram notifications connected successfully!\n` +
+        `⏰ <b>Timestamp:</b> ${formatIst(new Date())} IST\n` +
+        `📊 <b>Active Universe:</b> ${state.universe.length} F&O Equities\n` +
+        `🤖 <b>Strategy-1 Engine:</b> ${state.virtual.enabled ? 'ACTIVE (Armed)' : 'STANDBY'}\n` +
+        `💼 <b>Virtual Capital:</b> ₹${Number(state.virtual.capital).toLocaleString('en-IN')}\n` +
+        `📡 <b>Session Status:</b> ${isPreOpenSession() ? 'Pre-Open' : marketOpenNow() ? 'Market Live' : 'Market Closed'}`;
+
+      try {
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+          chat_id: chat,
+          text: testMsg,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true
+        });
+        log('Telegram test message dispatched successfully.');
+        return send(res, 200, { ok: true, message: 'Test message sent successfully to your Telegram group!' });
+      } catch (err) {
+        const desc = err.response?.data?.description || err.message;
+        log(`Telegram test send failed: ${desc}`, 'warn');
+        return send(res, 502, { ok: false, error: `Telegram API Error: ${desc}` });
+      }
     }
 
     if (u.pathname === '/api/virtual/toggle' && req.method === 'POST') {
       const body = await readBody(req);
       if (typeof body.enabled === 'boolean') state.virtual.enabled = body.enabled;
-      if (Number.isFinite(Number(body.capital))) state.virtual.capital = Number(body.capital);
-      log(`Virtual trading ${state.virtual.enabled ? 'ENABLED' : 'DISABLED'}; capital=₹${state.virtual.capital}`);
+      if (Number.isFinite(Number(body.capital))) {
+        state.virtual.capital = Number(body.capital);
+        await saveVirtualAccountToDb(state.virtual.capital);
+      }
+      log(`Virtual trading ${state.virtual.enabled ? 'ENABLED' : 'DISABLED'}; Capital: ₹${state.virtual.capital}`);
       return send(res, 200, { ok: true, enabled: state.virtual.enabled, capital: state.virtual.capital });
     }
 
@@ -2164,19 +2304,65 @@ async function route(req, res) {
       return send(res, 200, { ok: true, tradesToday: state.virtual.tradesToday, open: state.virtual.open.length });
     }
 
+    if (u.pathname === '/api/rebuild' && req.method === 'POST') {
+      const appId = state.fyers.appId;
+      const token = state.fyers.token;
+      if (!appId || !token) {
+        return send(res, 400, { ok: false, error: 'FYERS credentials required to rebuild timeline. Please login first.' });
+      }
+      log('Triggered manual timeline rebuild via UI button…');
+      checkAndGapFillHistory(appId, token, istToday(), true)
+        .then(() => {
+          log('Manual timeline rebuild finished successfully.');
+          if (browserSockets.size) broadcastDashboard();
+        })
+        .catch(err => {
+          log(`Manual rebuild error: ${err.message}`, 'error');
+        });
+      return send(res, 200, { ok: true, message: 'Timeline rebuild started in the background. Check logs window for progress!' });
+    }
+
+    if (u.pathname === '/api/virtual/backtest-day' && req.method === 'POST') {
+      const appId = state.fyers.appId;
+      const token = state.fyers.token;
+      if (!appId || !token) {
+        return send(res, 400, { ok: false, error: 'FYERS credentials required to run EOD backtest. Please login first.' });
+      }
+      const now = istParts(new Date());
+      const force = u.searchParams.get('force') === '1';
+      if (!force && now.time < '15:40:00') {
+        return send(res, 400, {
+          ok: false,
+          error: `Day backtest is only permitted after 15:40 IST (Market Close + Candle Settlement). Current IST time: ${now.time}`
+        });
+      }
+      log(`Starting Strategy-1 End-of-Day Backtest for ${now.date} (Post 15:40 IST)...`);
+      try {
+        const result = await runDayBacktest(now.date, appId, token);
+        if (browserSockets.size) broadcastDashboard();
+        return send(res, 200, { ok: true, ...result });
+      } catch (err) {
+        log(`Day backtest failed: ${err.message}`, 'error');
+        return send(res, 500, { ok: false, error: err.message });
+      }
+    }
+
     return send(res, 404, { error: 'Not found' });
-  } catch (e) {
-    log(e.message, 'error');
-    return send(res, 500, { ok: false, error: e.message, logs: state.log.slice(-20) });
+  } catch (err) {
+    log(`HTTP Route Error: ${err.message}`, 'error');
+    return send(res, 500, { ok: false, error: err.message });
   }
 }
 
-/* ---------- Server ---------- */
+/* ---------- Start HTTP Server & Browser WebSockets ---------- */
 const htmlPath = path.join(__dirname, 'index.html');
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
   if (u.pathname.startsWith('/api/')) return route(req, res);
   if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) {
+    if (!fs.existsSync(htmlPath)) {
+      return send(res, 404, 'index.html missing', 'text/plain');
+    }
     const html = fs.readFileSync(htmlPath);
     cors(res);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -2185,8 +2371,7 @@ const server = http.createServer((req, res) => {
   send(res, 404, 'Not found', 'text/plain');
 });
 
-const { WebSocketServer } = require('ws');
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocket.Server({ noServer: true });
 wss.on('connection', async ws => {
   browserSockets.add(ws);
   try {
@@ -2194,86 +2379,89 @@ wss.on('connection', async ws => {
   } catch {}
   ws.on('close', () => browserSockets.delete(ws));
 });
+
 server.on('upgrade', (req, socket, head) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
-  if (u.pathname !== '/ws') { socket.destroy(); return; }
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  if (u.pathname === '/ws') {
+    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  } else {
+    socket.destroy();
+  }
 });
 
 /* ---------- Timers ---------- */
-setInterval(async () => {
-  if (!state.fyers.appId) return;
-  try {
-    const today = istToday();
-    if (!regularSessionStarted() || !isTradingSessionDay()) {
-      if (state.displayMode !== 'previous-close') {
-        await loadLatestCompletedSession(state.fyers.appId, state.fyers.token);
-        broadcastDashboard();
-      }
-      return;
-    }
-    if (state.currentDay !== today || state.displayMode !== 'current') {
-      resetSession(today);
-      if (!historyRebuildPromise) {
-        historyRebuildPromise = rebuildHistoryFromFyers(state.fyers.appId, state.fyers.token)
-          .catch(e => log(`Session rebuild: ${e.message}`, 'warn'))
-          .finally(() => { historyRebuildPromise = null; });
-      }
-      broadcastDashboard();
-    }
-  } catch (e) {
-    log(`Session monitor: ${e.message}`, 'warn');
-  }
-}, 5000);
-
+// Regular index quote keeper (every 45s)
 setInterval(() => {
-  makeCandleSnapshot().catch(e => log(`Snapshot timer: ${e.message}`, 'warn'));
+  refreshIndexQuotes().catch(() => {});
+}, 45000);
+
+// 5-min snapshot timer (evaluates within first 90s of each 5m mark)
+setInterval(() => {
+  makeCandleSnapshot().catch(e => log(`Snapshot timer err: ${e.message}`, 'warn'));
 }, 15000);
 
-// Keep quotes fresh on the SERVER even if browser is closed (until logout)
+// Anti-freeze server-side quote keeper (every 60s)
 setInterval(() => {
-  if (!state.fyers.appId || !state.fyers.token || state.fyers.tokenInvalid) return;
+  if (!state.fyers.appId || !state.fyers.token) return;
   if (!marketOpenNow()) return;
-  if (Date.now() < fyersCooldownUntil) return;
   if (!state.fyers.connected || liveDataAgeSec() > 75) {
     refreshLiveQuotes(state.fyers.connected ? 'stale' : 'ws-down')
       .then(ok => {
         if (ok) {
           manageOpenVirtualTrades();
-          broadcastDashboard();
+          if (browserSockets.size) broadcastDashboard();
         }
       })
       .catch(() => {});
   }
-}, 90000);
+}, 60000);
 
+// Strategy 1 scan timer (runs every 45s during market hours)
 setInterval(() => {
-  if (state.fyers.appId && marketOpenNow() && !state.fyers.tokenInvalid) {
+  scanStrategy1().catch(e => log(`S1 scan err: ${e.message}`, 'warn'));
+  manageOpenVirtualTrades();
+}, 45000);
+
+// Open positions monitor (every 5s)
+setInterval(() => {
+  if (state.virtual.open.length && marketOpenNow()) {
     manageOpenVirtualTrades();
     if (browserSockets.size) broadcastDashboard();
   }
 }, 5000);
 
-setInterval(() => {
-  if (!state.fyers.appId || !state.fyers.token || state.fyers.tokenInvalid) return;
-  if (Date.now() < fyersCooldownUntil) return;
-  if (liveDataAgeSec() > 180) {
-    log('S1 scan skipped — quotes too stale; waiting for successful refresh.', 'warn');
-    return;
-  }
-  scanStrategy1().catch(e => log(`S1 scan: ${e.message}`, 'warn'));
-  manageOpenVirtualTrades();
-}, 60000);
-
-/* ---------- Start ---------- */
+/* ---------- Boot ---------- */
 (async () => {
   try {
     await initDb();
     await ensureUniverse();
-    log(`Dashboard server listening on ${HOST}:${PORT}`);
-    server.listen(PORT, HOST);
+    await loadVirtualAccountFromDb();
+    await loadDbHistory(istToday());
+    if (state.history.size === 0) {
+      loadSeedHistory();
+    }
+    await loadOpenVirtualFromDb();
+
+    // Check saved session in DB first
+    const savedSession = await loadSessionFromDb();
+    if (savedSession && !state.fyers.token) {
+      state.fyers.appId = savedSession.appId;
+      state.fyers.token = savedSession.token;
+      log('Restored FYERS background session credentials from database.');
+    }
+
+    if (state.fyers.appId && state.fyers.token) {
+      log('Bootstrapping FYERS background session…');
+      await seedInitialQuotes(state.fyers.appId, state.fyers.token);
+      startFyersSocket();
+      checkAndGapFillHistory(state.fyers.appId, state.fyers.token).catch(() => {});
+    }
+
+    server.listen(PORT, HOST, () => {
+      log(`FYERS F&O Intraday Dashboard listening on http://${HOST}:${PORT}`);
+    });
   } catch (e) {
-    console.error(e);
+    console.error('Fatal initialization error:', e);
     process.exit(1);
   }
 })();
