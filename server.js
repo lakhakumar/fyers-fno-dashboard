@@ -107,7 +107,9 @@ const SECTOR_MAP = {
   "ULTRACEMCO": "Chemicals & Materials", "UNIONBANK": "Banking", "UNITDSPR": "FMCG",
   "UPL": "Chemicals & Materials", "VBL": "FMCG", "VEDL": "Metals & Mining",
   "VOLTAS": "Consumer Durables", "WIPRO": "Information Technology", "YESBANK": "Banking",
-  "ZOMATO": "Services & Hospitality", "ZYDUSLIFE": "Healthcare"
+  "ZOMATO": "Services & Hospitality", "ZYDUSLIFE": "Healthcare",
+  "UJJIVANSFB": "Banking", "UNOMINDA": "Automobile", "VMM": "Metals & Mining",
+  "WAAREEENER": "Power & Green Energy", "ATHERENERG": "Automobile"
 };
 
 const DEFAULT_FNO_STOCKS = Object.keys(SECTOR_MAP);
@@ -135,7 +137,7 @@ const state = {
   lastQuoteRefreshAt: 0,
   virtual: {
     enabled: true,
-    capital: Number(process.env.VIRTUAL_CAPITAL || 300000),
+    capital: Number(process.env.VIRTUAL_CAPITAL || 30000),
     riskPct: 1,
     maxTrades: 3,
     open: [],
@@ -290,8 +292,18 @@ async function loadVirtualAccountFromDb() {
       `SELECT balance FROM virtual_account WHERE broker='fyers' ORDER BY id DESC LIMIT 1`
     );
     if (res.rows.length > 0) {
-      state.virtual.capital = Number(res.rows[0].balance);
-      log(`Restored virtual account capital from DB: ₹${state.virtual.capital.toLocaleString('en-IN')}`);
+      const dbBal = Number(res.rows[0].balance);
+      if (dbBal > 45000 || !Number.isFinite(dbBal)) {
+        state.virtual.capital = 30000;
+        await saveVirtualAccountToDb(30000);
+        log(`Reset virtual account capital to target: ₹30,000`);
+      } else {
+        state.virtual.capital = dbBal;
+        log(`Restored virtual account capital from DB: ₹${state.virtual.capital.toLocaleString('en-IN')}`);
+      }
+    } else {
+      state.virtual.capital = 30000;
+      await saveVirtualAccountToDb(30000);
     }
   } catch {}
 }
@@ -604,6 +616,32 @@ function formatIst(ts) {
   }
 }
 
+function formatIstTime(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }) + ' IST';
+  } catch {
+    return String(ts);
+  }
+}
+
+function calcDurationStr(startTs, endTs) {
+  if (!startTs || !endTs) return '';
+  try {
+    const ms = new Date(endTs).getTime() - new Date(startTs).getTime();
+    if (ms <= 0) return '0m';
+    const totalMins = Math.floor(ms / 60000);
+    const hrs = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+  } catch {
+    return '';
+  }
+}
+
 /* ---------- FYERS Authentication & REST API Communication ---------- */
 function getFyersAuth(rawAppId, rawToken) {
   let appId = String(rawAppId || '').trim();
@@ -657,22 +695,85 @@ async function fyersGet(base, endpoint, params, appId, token) {
   return res.data;
 }
 
-/* ---------- Universe Initialization ---------- */
-async function ensureUniverse() {
-  if (state.universe.length) return state.universe;
-  const list = [];
-  for (const s of DEFAULT_FNO_STOCKS) {
-    const sym = `NSE:${s}-EQ`;
-    list.push({
-      key: s,
-      name: s,
-      symbol: sym,
-      sector: SECTOR_MAP[s] || 'Other F&O'
-    });
+/* ---------- Universe Initialization from Script Master ---------- */
+const FNO_CACHE_FILE = path.join(__dirname, 'fno_universe_cache.json');
+
+async function syncFnoMasterUniverse(force = false) {
+  // Check if cache file exists and is less than 30 days old (runs once every month)
+  if (!force && fs.existsSync(FNO_CACHE_FILE)) {
+    try {
+      const cache = JSON.parse(fs.readFileSync(FNO_CACHE_FILE, 'utf8'));
+      const ageMs = Date.now() - (cache.timestamp || 0);
+      const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+      if (ageMs < thirtyDays && Array.isArray(cache.stocks) && cache.stocks.length >= 150) {
+        log(`Loaded ${cache.stocks.length} active F&O equities from monthly script master cache.`);
+        state.universe = cache.stocks.map(s => ({
+          key: s,
+          name: s,
+          symbol: `NSE:${s}-EQ`,
+          sector: SECTOR_MAP[s] || 'Other F&O'
+        }));
+        return state.universe;
+      }
+    } catch {}
   }
-  state.universe = list;
-  log(`Initialized active F&O universe with ${list.length} equities.`);
-  return list;
+
+  log('Syncing active F&O equities from FYERS Symbol Master (https://public.fyers.in/sym_details/NSE_FO.csv)…');
+  try {
+    const res = await axios.get('https://public.fyers.in/sym_details/NSE_FO.csv', {
+      timeout: 25000,
+      responseType: 'text'
+    });
+    const lines = res.data.split('\n');
+    const fnoEquities = new Set();
+
+    for (const line of lines) {
+      if (!line) continue;
+      const parts = line.split(',');
+      if (parts.length >= 14) {
+        const instType = parts[2]?.trim();
+        const underlying = parts[13]?.trim();
+        // 13 = Stock Futures (FUTSTK)
+        if (instType === '13' && underlying) {
+          fnoEquities.add(underlying);
+        }
+      }
+    }
+
+    const stockList = [...fnoEquities].sort();
+    if (stockList.length >= 150) {
+      fs.writeFileSync(FNO_CACHE_FILE, JSON.stringify({
+        timestamp: Date.now(),
+        date: istToday(),
+        count: stockList.length,
+        stocks: stockList
+      }, null, 2));
+      log(`Extracted & synced ${stockList.length} active F&O equities from FYERS script master.`);
+      state.universe = stockList.map(s => ({
+        key: s,
+        name: s,
+        symbol: `NSE:${s}-EQ`,
+        sector: SECTOR_MAP[s] || 'Other F&O'
+      }));
+      return state.universe;
+    }
+  } catch (err) {
+    log(`Script master download error: ${err.message}. Using fallback universe.`, 'warn');
+  }
+
+  state.universe = DEFAULT_FNO_STOCKS.map(s => ({
+    key: s,
+    name: s,
+    symbol: `NSE:${s}-EQ`,
+    sector: SECTOR_MAP[s] || 'Other F&O'
+  }));
+  log(`Initialized default active F&O universe with ${state.universe.length} equities.`);
+  return state.universe;
+}
+
+async function ensureUniverse() {
+  if (state.universe.length >= 150) return state.universe;
+  return await syncFnoMasterUniverse();
 }
 
 /* ---------- Quote Fetching (FYERS Data API v3) ---------- */
@@ -1433,8 +1534,7 @@ async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll =
 
   try {
     const universe = await ensureUniverse();
-    const bucketMap = new Map();
-    intervalsToFill.forEach(t => bucketMap.set(t, []));
+    const stockPriceTimelines = new Map();
 
     const batchSize = 25;
     for (let i = 0; i < universe.length; i += batchSize) {
@@ -1442,39 +1542,60 @@ async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll =
       await Promise.all(slice.map(async st => {
         try {
           const candles = await fetchHistorical5m(st, appId, token, targetDate, targetDate);
-          if (!candles.length) return;
-          const openPrice = candles[0].open;
-          const prev = (state.live.get(st.symbol)?.prev) || openPrice;
-
-          for (const c of candles) {
-            const barDate = new Date(c.time * 1000);
-            const timeStr = barDate.toLocaleTimeString('en-GB', {
-              timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
-            });
-            if (bucketMap.has(timeStr)) {
-              bucketMap.get(timeStr).push({
-                ...st,
-                close: c.close,
-                pct: pct(c.close, prev)
-              });
-            }
-          }
+          const prev = (state.live.get(st.symbol)?.prev) || (candles[0]?.open) || 100;
+          stockPriceTimelines.set(st.key, { stock: st, prev, candles });
         } catch {}
       }));
       log(`[REBUILD] 5m candles scanned for ${Math.min(i + batchSize, universe.length)}/${universe.length} equities…`);
     }
 
     for (const t of intervalsToFill) {
-      const rows = bucketMap.get(t) || [];
-      if (rows.length >= 10) {
-        const gainers = [...rows].sort((a, b) => b.pct - a.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
-        const losers = [...rows].sort((a, b) => a.pct - b.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
+      const rowsAtT = [];
+      for (const st of universe) {
+        const timeline = stockPriceTimelines.get(st.key);
+        if (!timeline || !timeline.candles.length) {
+          // Check if existing snapshot or live quote has this stock
+          const existingSnap = state.history.get(t);
+          const existingRow = existingSnap?.gainers?.find(x => x.key === st.key) || existingSnap?.losers?.find(x => x.key === st.key);
+          if (existingRow) {
+            rowsAtT.push({ ...st, close: existingRow.close, pct: existingRow.pct });
+          } else {
+            const liveQ = state.live.get(st.symbol) || state.live.get(st.key);
+            rowsAtT.push({ ...st, close: liveQ?.ltp || 100, pct: liveQ?.changePct || 0 });
+          }
+          continue;
+        }
+
+        // Find the candle at or immediately prior to time t
+        const prev = timeline.prev;
+        let matchedCandle = null;
+        for (const c of timeline.candles) {
+          const timeStr = c.timeStr || new Date(c.time * 1000).toLocaleTimeString('en-GB', {
+            timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit'
+          });
+          if (timeStr <= t) {
+            matchedCandle = c;
+          } else {
+            break;
+          }
+        }
+        const barClose = matchedCandle ? matchedCandle.close : timeline.candles[0].open;
+        rowsAtT.push({
+          ...st,
+          close: barClose,
+          pct: pct(barClose, prev)
+        });
+      }
+
+      if (rowsAtT.length >= 10) {
+        const gainers = [...rowsAtT].sort((a, b) => b.pct - a.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
+        const losers = [...rowsAtT].sort((a, b) => a.pct - b.pct).map((x, idx) => ({ ...x, rank: idx + 1 }));
         state.history.set(t, { gainers, losers });
         await saveSnapshot(targetDate, t, 'gainers', gainers);
         await saveSnapshot(targetDate, t, 'losers', losers);
       }
     }
-    log(`[REBUILD] Gap-fill complete for ${targetDate}: ${state.history.size} snapshot columns now active.`);
+    log(`[REBUILD] Gap-fill complete for ${targetDate}: ${state.history.size} snapshot columns now active with full ${universe.length} equities.`);
     broadcastDashboard();
   } catch (err) {
     log(`[REBUILD] Gap-fill rebuild error: ${err.message}`, 'warn');
@@ -1677,8 +1798,9 @@ function manageOpenVirtualTrades() {
         state.virtual.closed.unshift(trade);
         state.virtual.open = state.virtual.open.filter(t => t !== trade);
         updateVirtualTradeDb(trade).catch(() => {});
-        log(`[S1] SL hit on ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
-        telegramSend(`🔴 <b>S1 SL HIT</b>: ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(trade.exitTs)} (${calcDurationStr(trade.entryTs, trade.exitTs)})`;
+        log(`[S1-EXIT] SL hit on ${trade.name} @ ₹${px.toFixed(2)} | Timeline: ${tLine} | Net PnL: ₹${netPnl} | Capital: ₹${state.virtual.capital}`, 'warn');
+        telegramSend(`🔴 <b>S1 SL HIT</b>: ${trade.name} @ ₹${px.toFixed(2)}\n⏱ <b>Timeline:</b> ${tLine}\n💵 Entry: ₹${trade.entryPrice} ➔ Exit: ₹${px.toFixed(2)} (${trade.qty} shs)\n✨ Net PnL: ₹${netPnl}\n💼 Capital: ₹${state.virtual.capital}`);
         continue;
       }
 
@@ -1689,8 +1811,9 @@ function manageOpenVirtualTrades() {
           trade.remainingQty -= halfQty;
           trade.realizedPnl += (px - trade.entryPrice) * halfQty;
           trade.stopLoss = trade.entryPrice;
-          log(`[S1] Target 1 on ${trade.name} @ ₹${px.toFixed(2)}. 50% booked, SL moved to breakeven.`);
-          telegramSend(`🎯 <b>S1 TARGET 1</b>: ${trade.name} @ ₹${px.toFixed(2)}. Booked 50%, SL to breakeven.`);
+          const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(new Date())} (${calcDurationStr(trade.entryTs, new Date())})`;
+          log(`[S1-T1] Target 1 on ${trade.name} @ ₹${px.toFixed(2)} | Timeline: ${tLine} | 50% booked, SL to BE`, 'info');
+          telegramSend(`🎯 <b>S1 TARGET 1</b>: ${trade.name} @ ₹${px.toFixed(2)}\n⏱ <b>Timeline:</b> ${tLine}\nBooked 50%, SL to Breakeven.`);
         }
       }
 
@@ -1711,8 +1834,9 @@ function manageOpenVirtualTrades() {
         state.virtual.closed.unshift(trade);
         state.virtual.open = state.virtual.open.filter(t => t !== trade);
         updateVirtualTradeDb(trade).catch(() => {});
-        log(`[S1] Closed ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
-        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(trade.exitTs)} (${calcDurationStr(trade.entryTs, trade.exitTs)})`;
+        log(`[S1-EXIT] Closed ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Timeline: ${tLine} | Net PnL: ₹${netPnl} | Capital: ₹${state.virtual.capital}`, 'info');
+        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: ${trade.name}\n⏱ <b>Timeline:</b> ${tLine}\n💵 Entry: ₹${trade.entryPrice} ➔ Exit: ₹${px.toFixed(2)} (${trade.qty} shs)\n✨ Net PnL: <b>${netPnl >= 0 ? '+' : ''}₹${netPnl}</b>\n💼 Capital: ₹${state.virtual.capital}`);
         continue;
       }
     } else {
@@ -1733,8 +1857,9 @@ function manageOpenVirtualTrades() {
         state.virtual.closed.unshift(trade);
         state.virtual.open = state.virtual.open.filter(t => t !== trade);
         updateVirtualTradeDb(trade).catch(() => {});
-        log(`[S1] SL hit on short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
-        telegramSend(`🔴 <b>S1 SL HIT</b>: Short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(trade.exitTs)} (${calcDurationStr(trade.entryTs, trade.exitTs)})`;
+        log(`[S1-EXIT] SL hit on short ${trade.name} @ ₹${px.toFixed(2)} | Timeline: ${tLine} | Net PnL: ₹${netPnl} | Capital: ₹${state.virtual.capital}`, 'warn');
+        telegramSend(`🔴 <b>S1 SL HIT</b>: Short ${trade.name} @ ₹${px.toFixed(2)}\n⏱ <b>Timeline:</b> ${tLine}\n💵 Entry: ₹${trade.entryPrice} ➔ Exit: ₹${px.toFixed(2)} (${trade.qty} shs)\n✨ Net PnL: ₹${netPnl}\n💼 Capital: ₹${state.virtual.capital}`);
         continue;
       }
 
@@ -1745,8 +1870,9 @@ function manageOpenVirtualTrades() {
           trade.remainingQty -= halfQty;
           trade.realizedPnl += (trade.entryPrice - px) * halfQty;
           trade.stopLoss = trade.entryPrice;
-          log(`[S1] Target 1 on short ${trade.name} @ ₹${px.toFixed(2)}. 50% booked, SL moved to breakeven.`);
-          telegramSend(`🎯 <b>S1 TARGET 1</b>: Short ${trade.name} @ ₹${px.toFixed(2)}. Booked 50%, SL to breakeven.`);
+          const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(new Date())} (${calcDurationStr(trade.entryTs, new Date())})`;
+          log(`[S1-T1] Target 1 on short ${trade.name} @ ₹${px.toFixed(2)} | Timeline: ${tLine} | 50% booked, SL to BE`, 'info');
+          telegramSend(`🎯 <b>S1 TARGET 1</b>: Short ${trade.name} @ ₹${px.toFixed(2)}\n⏱ <b>Timeline:</b> ${tLine}\nBooked 50%, SL to Breakeven.`);
         }
       }
 
@@ -1767,8 +1893,9 @@ function manageOpenVirtualTrades() {
         state.virtual.closed.unshift(trade);
         state.virtual.open = state.virtual.open.filter(t => t !== trade);
         updateVirtualTradeDb(trade).catch(() => {});
-        log(`[S1] Closed short ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
-        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: Short ${trade.name} @ ₹${px.toFixed(2)} | Net PnL: ₹${netPnl}`);
+        const tLine = `${formatIstTime(trade.entryTs)} ➔ ${formatIstTime(trade.exitTs)} (${calcDurationStr(trade.entryTs, trade.exitTs)})`;
+        log(`[S1-EXIT] Closed short ${trade.name} (${exitReason}) @ ₹${px.toFixed(2)} | Timeline: ${tLine} | Net PnL: ₹${netPnl} | Capital: ₹${state.virtual.capital}`, 'info');
+        telegramSend(`🚀 <b>S1 CLOSED (${exitReason})</b>: Short ${trade.name}\n⏱ <b>Timeline:</b> ${tLine}\n💵 Entry: ₹${trade.entryPrice} ➔ Exit: ₹${px.toFixed(2)} (${trade.qty} shs)\n✨ Net PnL: <b>${netPnl >= 0 ? '+' : ''}₹${netPnl}</b>\n💼 Capital: ₹${state.virtual.capital}`);
         continue;
       }
     }
@@ -1984,10 +2111,18 @@ async function runDayBacktest(targetDate, appId, token) {
   tgMsg += `🎯 <b>Trades Executed:</b> ${executedTrades.length}/${maxTrades} (${planSide} Mode)\n\n`;
 
   executedTrades.forEach((t, idx) => {
+    const entryT = formatIstTime(t.entryTs);
+    const exitT = formatIstTime(t.exitTs);
+    const durStr = calcDurationStr(t.entryTs, t.exitTs);
+    const timeLine = `${entryT} ➔ ${exitT}${durStr ? ` (${durStr})` : ''}`;
+
     tgMsg += `<b>${idx + 1}. ${t.name}</b> (${t.side})\n`;
-    tgMsg += `  Entry: ₹${t.entryPrice.toFixed(2)} × ${t.qty} shs\n`;
-    tgMsg += `  Exit: ₹${t.exitPrice.toFixed(2)} (${t.exitReason})\n`;
-    tgMsg += `  Net PnL: <b>${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(2)}</b> (Taxes: ₹${t.taxes.toFixed(2)})\n\n`;
+    tgMsg += `  ⏱ <b>Timeline:</b> ${timeLine}\n`;
+    tgMsg += `  💵 <b>Entry:</b> ₹${t.entryPrice.toFixed(2)} @ ${entryT} × ${t.qty} shs\n`;
+    tgMsg += `  🏁 <b>Exit:</b> ₹${t.exitPrice.toFixed(2)} @ ${exitT} (${t.exitReason})\n`;
+    tgMsg += `  ✨ <b>Net PnL:</b> <b>${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(2)}</b> (Taxes: ₹${t.taxes.toFixed(2)})\n\n`;
+
+    log(`[DAY-BACKTEST] ${idx + 1}. ${t.side} ${t.name}: ${timeLine} | Entry: ₹${t.entryPrice.toFixed(2)} ➔ Exit: ₹${t.exitPrice.toFixed(2)} (${t.exitReason}) | Net PnL: ${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(2)}`, t.pnl >= 0 ? 'info' : 'warn');
   });
 
   tgMsg += `━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -1996,7 +2131,7 @@ async function runDayBacktest(targetDate, appId, token) {
   tgMsg += `✨ <b>Net PnL:</b> <b>${totalNet >= 0 ? '+' : ''}₹${totalNet.toFixed(2)}</b>`;
 
   await telegramSend(tgMsg);
-  log(`[DAY-BACKTEST] Completed for ${targetDate}: ${executedTrades.length} trades (${planSide}), Net PnL: ₹${totalNet.toFixed(2)}`);
+  log(`[DAY-BACKTEST] Finished: ${executedTrades.length} trades (${planSide}) | Capital: ₹${initialCap.toLocaleString('en-IN')} ➔ ₹${currentCap.toLocaleString('en-IN')} | Net PnL: ${totalNet >= 0 ? '+' : ''}₹${totalNet.toFixed(2)}`);
   broadcastDashboard();
 
   return {

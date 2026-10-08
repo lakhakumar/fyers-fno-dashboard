@@ -647,7 +647,7 @@ function renderTable(type) {
           <div class="small">₹${fmt(r.ltp)}</div>
         </td>`;
       }
-      const pastRank = r.history ? r.history[t] : null;
+      const pastRank = (r.history && r.history[t]) || prevColRank || r.rank;
       const cellHtml = `<td>${renderRankBadge(pastRank, prevColRank)}</td>`;
       if (pastRank) prevColRank = pastRank;
       return cellHtml;

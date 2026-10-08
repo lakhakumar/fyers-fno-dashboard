@@ -66,7 +66,7 @@ Ensure the repository contains:
 | `FYERS_ACCESS_TOKEN` | Optional | Browser Session | Active daily JWT token from `myapi.fyers.in` |
 | `TELEGRAM_BOT_TOKEN` | Optional | — | Telegram Bot token from `@BotFather` |
 | `TELEGRAM_CHAT_ID` | Optional | — | Telegram chat or channel ID for instant alerts |
-| `VIRTUAL_CAPITAL` | Optional | `300000` | Initial virtual paper trading capital (₹) |
+| `VIRTUAL_CAPITAL` | Optional | `30000` | Initial virtual paper trading capital (₹) |
 
 ---
 
