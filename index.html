@@ -526,18 +526,23 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+function sanitizeHeader(val) {
+  if (!val) return '';
+  return String(val).replace(/[^\x20-\x7E]/g, '').trim();
+}
 let creds = {
-  appId: sessionStorage.getItem('fyersAppId') || '',
-  accessToken: sessionStorage.getItem('fyersToken') || ''
+  appId: sanitizeHeader(sessionStorage.getItem('fyersAppId') || ''),
+  accessToken: sanitizeHeader(sessionStorage.getItem('fyersToken') || '')
 };
 let autoRefresh = true, activeTab = 'gainers', lastData = null, socket = null, chartKey = '', lw = null, candleSeries = null;
 
 function headers() {
-  return {
-    'Content-Type': 'application/json',
-    'x-fyers-app-id': creds.appId,
-    'x-fyers-access-token': creds.accessToken
-  };
+  const h = { 'Content-Type': 'application/json' };
+  const k = sanitizeHeader(creds.appId);
+  const t = sanitizeHeader(creds.accessToken);
+  if (k) h['x-fyers-app-id'] = k;
+  if (t) h['x-fyers-access-token'] = t;
+  return h;
 }
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
