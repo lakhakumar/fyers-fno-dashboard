@@ -616,9 +616,9 @@ function renderIndices(data) {
     const val = Number(x.changePct ?? x.pct ?? 0);
     const cls = val >= 0 ? 'up' : 'down';
     let extra = '';
-    if (x.name && x.name.includes('NIFTY 50') && (x.advances != null || data.niftyBreadth)) {
-      const adv = x.advances ?? data.niftyBreadth?.advances ?? 0;
-      const dec = x.declines ?? data.niftyBreadth?.declines ?? 0;
+    if (x.name && (x.name.includes('NIFTY 50') || x.name.includes('BANK NIFTY')) && (x.advances != null || data.niftyBreadth)) {
+      const adv = x.advances ?? (x.name.includes('NIFTY 50') ? data.niftyBreadth?.advances : 0) ?? 0;
+      const dec = x.declines ?? (x.name.includes('NIFTY 50') ? data.niftyBreadth?.declines : 0) ?? 0;
       extra = `<span class="index-badge"><span class="up">${adv}↗</span> <span class="down">${dec}↘</span></span>`;
     }
     return `

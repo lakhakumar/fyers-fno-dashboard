@@ -38,6 +38,11 @@ const NIFTY50 = new Set([
   'APOLLOHOSP','HDFCLIFE','TATACONSUM','ADANIPORTS','BAJAJ-AUTO','UPL','TATAMOTORS'
 ]);
 
+const BANKNIFTY = new Set([
+  'HDFCBANK','ICICIBANK','SBIN','KOTAKBANK','AXISBANK','INDUSINDBK','BANKBARODA',
+  'PNB','AUBANK','FEDERALBNK','BANDHANBNK','IDFCFIRSTB'
+]);
+
 const SECTOR_MAP = {
   "360ONE": "Financial Services", "ABB": "Industrials & Defence", "ABCAPITAL": "Financial Services",
   "ADANIENSOL": "Power & Green Energy", "ADANIENT": "Services & Hospitality", "ADANIGREEN": "Power & Green Energy",
@@ -1032,14 +1037,43 @@ async function refreshIndexQuotes(force = false) {
     if (!idx.yahoo) continue;
     try {
       const res = await axios.get(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${idx.yahoo}?interval=1d&range=1d`,
+        `https://query1.finance.yahoo.com/v8/finance/chart/${idx.yahoo}?interval=1d&range=5d`,
         { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 4000 }
       );
-      const meta = res?.data?.chart?.result?.[0]?.meta;
+      const resData = res?.data?.chart?.result?.[0];
+      const meta = resData?.meta;
       if (meta) {
         const ltp = Number(meta.regularMarketPrice);
-        const prev = Number(meta.chartPreviousClose || meta.previousClose || ltp);
-        const changePct = prev ? Number((((ltp - prev) / prev) * 100).toFixed(2)) : 0;
+        const rmt = meta.regularMarketTime;
+        const marketDate = rmt ? istParts(new Date(rmt * 1000)).date : null;
+
+        const timestamps = resData?.timestamp || [];
+        const rawCloses = resData?.indicators?.quote?.[0]?.close || [];
+        const bars = [];
+        for (let i = 0; i < timestamps.length; i++) {
+          const c = rawCloses[i];
+          if (c != null && Number.isFinite(c)) {
+            const barDate = istParts(new Date(timestamps[i] * 1000)).date;
+            bars.push({ date: barDate, close: Number(c) });
+          }
+        }
+
+        let prev = null;
+        const priorBars = marketDate ? bars.filter(b => b.date < marketDate) : [];
+        if (priorBars.length > 0) {
+          prev = priorBars[priorBars.length - 1].close;
+        } else if (bars.length >= 2 && Math.abs(bars[bars.length - 1].close - ltp) < 1.0) {
+          prev = bars[bars.length - 2].close;
+        } else if (bars.length >= 1) {
+          prev = bars[bars.length - 1].close;
+        } else {
+          prev = Number(meta.chartPreviousClose || meta.previousClose || ltp);
+        }
+
+        const changePct = prev && Number.isFinite(prev)
+          ? Number((((ltp - prev) / prev) * 100).toFixed(2))
+          : 0;
+
         state.indices.set(idx.symbol, {
           symbol: idx.symbol,
           name: idx.name,
@@ -2427,6 +2461,8 @@ async function dashboardData() {
   const b = breadth(allRows);
   const sectors = sectorData(allRows);
 
+  const allRowsMap = new Map((allRows || []).map(r => [normalizeKey(r.key || r.symbol || r.name), r]));
+
   const idxCards = INDEX_CONFIG.map(cfg => {
     const q = state.indices.get(cfg.symbol) || state.live.get(cfg.symbol) || {};
     let ltp = q.ltp ?? null;
@@ -2435,12 +2471,21 @@ async function dashboardData() {
     let dec = b.declines;
 
     if (cfg.name === 'NIFTY 50') {
-      const n50Stocks = [...NIFTY50].map(k => state.live.get(`NSE:${k}-EQ`) || state.live.get(k)).filter(Boolean);
+      const n50Stocks = [...NIFTY50].map(k => state.live.get(`NSE:${k}-EQ`) || state.live.get(k) || allRowsMap.get(k)).filter(Boolean);
       if (n50Stocks.length) {
-        adv = n50Stocks.filter(x => (x.changePct || 0) > 0).length;
-        dec = n50Stocks.filter(x => (x.changePct || 0) < 0).length;
+        adv = n50Stocks.filter(x => (x.changePct ?? x.pct ?? 0) > 0).length;
+        dec = n50Stocks.filter(x => (x.changePct ?? x.pct ?? 0) < 0).length;
         if (pctVal == null) {
-          pctVal = Number((n50Stocks.reduce((a, x) => a + (x.changePct || 0), 0) / n50Stocks.length).toFixed(2));
+          pctVal = Number((n50Stocks.reduce((a, x) => a + (x.changePct ?? x.pct ?? 0), 0) / n50Stocks.length).toFixed(2));
+        }
+      }
+    } else if (cfg.name === 'BANK NIFTY') {
+      const bnStocks = [...BANKNIFTY].map(k => state.live.get(`NSE:${k}-EQ`) || state.live.get(k) || allRowsMap.get(k)).filter(Boolean);
+      if (bnStocks.length) {
+        adv = bnStocks.filter(x => (x.changePct ?? x.pct ?? 0) > 0).length;
+        dec = bnStocks.filter(x => (x.changePct ?? x.pct ?? 0) < 0).length;
+        if (pctVal == null) {
+          pctVal = Number((bnStocks.reduce((a, x) => a + (x.changePct ?? x.pct ?? 0), 0) / bnStocks.length).toFixed(2));
         }
       }
     }
