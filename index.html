@@ -85,19 +85,24 @@ button { cursor: pointer; transition: all 0.15s ease; }
 .dot.open { background: var(--green); box-shadow: 0 0 10px var(--green); }
 
 /* Indices Bar */
-.indices { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.indices { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
 .index-card {
   background: var(--card-bg); backdrop-filter: blur(8px);
-  border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 12px 14px; box-shadow: var(--shadow);
-  transition: transform 0.2s ease, border-color 0.2s ease;
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 10px; box-shadow: var(--shadow);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  min-height: 46px; display: flex; flex-direction: column; justify-content: center;
 }
-.index-card:hover { transform: translateY(-2px); border-color: var(--line-light); }
-.index-name { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-.index-value { font-size: 21px; font-weight: 800; margin: 3px 0; font-family: 'JetBrains Mono', monospace; }
+.index-card:hover { transform: translateY(-1px); border-color: var(--line-light); }
+.index-top-row { display: flex; justify-content: space-between; align-items: baseline; }
+.index-bot-row { display: flex; justify-content: space-between; align-items: baseline; margin-top: 1px; }
+.index-name { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+.index-value { font-size: 15px; font-weight: 800; font-family: 'JetBrains Mono', monospace; line-height: 1.1; }
+.index-pct { font-size: 11px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.index-badge { font-size: 9.5px; color: var(--muted); background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 4px; }
 .up { color: var(--green); }
 .down { color: var(--red); }
-.ad-line { font-size: 10px; color: var(--muted); margin-top: 4px; }
+.ad-line { font-size: 9.5px; color: var(--muted); margin-top: 1px; }
 
 /* Tabs */
 .tabs {
@@ -138,13 +143,23 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
   width: 105px; min-width: 105px; max-width: 105px;
   padding: 6px 8px; overflow: hidden; text-overflow: ellipsis;
 }
-.rankchg-head, .rankchg-cell {
-  position: sticky; left: 105px; z-index: 4; text-align: center;
-  width: 58px; min-width: 58px; max-width: 58px;
-  padding: 6px 4px;
+.ltp-head, .ltp-cell {
+  position: sticky; left: 105px; z-index: 4; text-align: right;
+  width: 72px; min-width: 72px; max-width: 72px;
+  padding: 6px 6px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 600; color: #f0f6fc;
 }
-.stock-head, .rankchg-head { z-index: 7; }
-.stock-cell, .rankchg-cell { background: #0b1728; }
+.pct-head, .pct-cell {
+  position: sticky; left: 177px; z-index: 4; text-align: right;
+  width: 64px; min-width: 64px; max-width: 64px;
+  padding: 6px 6px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 700;
+}
+.rankchg-head, .rankchg-cell {
+  position: sticky; left: 241px; z-index: 4; text-align: center;
+  width: 58px; min-width: 58px; max-width: 58px;
+  padding: 6px 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+}
+.stock-head, .ltp-head, .pct-head, .rankchg-head { z-index: 7; }
+.stock-cell, .ltp-cell, .pct-cell, .rankchg-cell { background: #0b1728; }
 .stock-cell { font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
 .stock-cell a,
 #sectorDetail .stock-cell a {
@@ -172,8 +187,10 @@ th:first-child, td:first-child { position: sticky; left: 0; z-index: 4; }
 .neutral { color: var(--muted); }
 .major-up td { background: rgba(38, 231, 136, 0.14) !important; }
 .major-down td { background: rgba(255, 83, 100, 0.14) !important; }
-.major-up .stock-cell, .major-up .rankchg-cell { background: rgba(18, 64, 42, 0.95); border-left: 3px solid var(--green); }
-.major-down .stock-cell, .major-down .rankchg-cell { background: rgba(72, 24, 34, 0.95); border-left: 3px solid var(--red); }
+.major-up .stock-cell, .major-up .ltp-cell, .major-up .pct-cell, .major-up .rankchg-cell { background: rgba(18, 64, 42, 0.95); }
+.major-down .stock-cell, .major-down .ltp-cell, .major-down .pct-cell, .major-down .rankchg-cell { background: rgba(72, 24, 34, 0.95); }
+.major-up .stock-cell { border-left: 3px solid var(--green); }
+.major-down .stock-cell { border-left: 3px solid var(--red); }
 .moderate-up td { background: rgba(38, 231, 136, 0.06) !important; }
 .moderate-down td { background: rgba(255, 83, 100, 0.06) !important; }
 .moderate-up .stock-cell { border-left: 2px solid rgba(38, 231, 136, 0.6); }
@@ -597,24 +614,32 @@ function renderIndices(data) {
     if (x.name && x.name.includes('NIFTY 50') && (x.advances != null || data.niftyBreadth)) {
       const adv = x.advances ?? data.niftyBreadth?.advances ?? 0;
       const dec = x.declines ?? data.niftyBreadth?.declines ?? 0;
-      extra = `<div class="ad-line">Adv: <span class="up">${adv}</span> / Dec: <span class="down">${dec}</span></div>`;
+      extra = `<span class="index-badge"><span class="up">${adv}↗</span> <span class="down">${dec}↘</span></span>`;
     }
     return `
       <div class="index-card">
-        <div class="index-name">${esc(x.name)}</div>
-        <div class="index-value ${cls}">${fmt(x.ltp)}</div>
-        <div class="small ${cls}">${signed(fmt(val))}%</div>
-        ${extra}
+        <div class="index-top-row">
+          <span class="index-name">${esc(x.name)}</span>
+          <span class="index-pct ${cls}">${signed(fmt(val))}%</span>
+        </div>
+        <div class="index-bot-row">
+          <span class="index-value ${cls}">${fmt(x.ltp)}</span>
+          ${extra}
+        </div>
       </div>`;
   }).join('');
 
   const b = data.breadth || { advances: 0, declines: 0, unchanged: 0, total: 0 };
   const bCard = `
     <div class="index-card">
-      <div class="index-name">F&O Market Breadth</div>
-      <div class="index-value" style="font-size:18px"><span class="up">${b.advances}</span> : <span class="down">${b.declines}</span></div>
-      <div class="small">Total tracked: ${b.total || data.universeSize || 212} equities</div>
-      <div class="ad-line">Unchanged: ${b.unchanged || 0}</div>
+      <div class="index-top-row">
+        <span class="index-name">F&O Breadth</span>
+        <span class="index-badge">${b.total || data.universeSize || 212} Stocks</span>
+      </div>
+      <div class="index-bot-row">
+        <span class="index-value" style="font-size:14px"><span class="up">${b.advances} ▲</span> : <span class="down">${b.declines} ▼</span></span>
+        <span class="index-badge">Unch: ${b.unchanged || 0}</span>
+      </div>
     </div>`;
 
   $('#indices').innerHTML = cards + bCard;
@@ -623,13 +648,17 @@ function renderIndices(data) {
 /* Render Gainers / Losers Table */
 function renderTable(type) {
   const rows = (lastData && lastData[type]) || [];
-  const times = (lastData && lastData.times) || [];
+  const rawTimes = (lastData && lastData.times) || [];
+  const pastTimes = rawTimes.filter(t => t !== 'CURRENT');
   $('#caption').textContent = `Top 30 F&O ${type === 'gainers' ? 'Gainers' : 'Losers'} • Click any stock for 5m candlestick chart`;
 
   const thead = `<tr>
     <th class="stock-head">Stock</th>
+    <th class="ltp-head">LTP (₹)</th>
+    <th class="pct-head">% Chg</th>
     <th class="rankchg-head">Rank Δ</th>
-    ${times.map(t => `<th class="${t === 'CURRENT' ? 'current-col' : ''}">${t}</th>`).join('')}
+    ${pastTimes.map(t => `<th>${t}</th>`).join('')}
+    <th class="current-col">Current</th>
   </tr>`;
 
   const tbody = rows.map(r => {
@@ -639,14 +668,7 @@ function renderTable(type) {
     const deltaColorClass = delta != null ? (delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'neutral') : 'neutral';
 
     let prevColRank = null;
-    const cols = times.map(t => {
-      if (t === 'CURRENT') {
-        return `<td class="current-col">
-          <div class="rank-strong">#${r.rank}</div>
-          <div class="${(r.pct || 0) >= 0 ? 'positive' : 'negative'}">${signed(fmt(r.pct))}%</div>
-          <div class="small">₹${fmt(r.ltp)}</div>
-        </td>`;
-      }
+    const cols = pastTimes.map(t => {
       const pastRank = (r.history && r.history[t]) || prevColRank || r.rank;
       const cellHtml = `<td>${renderRankBadge(pastRank, prevColRank)}</td>`;
       if (pastRank) prevColRank = pastRank;
@@ -659,10 +681,15 @@ function renderTable(type) {
           <a onclick="openChart('${r.key}', ${r.pct})">${esc(r.name)}</a>
           <span class="sector-tag">${esc(r.sector)}</span>
         </td>
+        <td class="ltp-cell">₹${fmt(r.ltp)}</td>
+        <td class="pct-cell ${(r.pct || 0) >= 0 ? 'positive' : 'negative'}">${signed(fmt(r.pct))}%</td>
         <td class="rankchg-cell ${deltaColorClass}">${deltaText}</td>
         ${cols}
+        <td class="current-col">
+          <div class="rank-strong">#${r.rank}</div>
+        </td>
       </tr>`;
-  }).join('') || `<tr><td colspan="${times.length + 2}" style="text-align:center;padding:20px">No ranking data available</td></tr>`;
+  }).join('') || `<tr><td colspan="${pastTimes.length + 5}" style="text-align:center;padding:20px">No ranking data available</td></tr>`;
 
   $('#tableWrap').innerHTML = `<table><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
 }
@@ -777,6 +804,34 @@ function renderScanner() {
   $('#scannerTable').innerHTML = `<table><thead><tr><th class="stock-head">Stock</th><th>Rank</th><th>Rank Δ</th><th>% Change</th><th>LTP</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function formatTimeStr(ts) {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts).slice(11, 19) || String(ts);
+    return d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  } catch {
+    return '—';
+  }
+}
+
+function calcDuration(startTs, endTs) {
+  if (!startTs) return '';
+  try {
+    const s = new Date(startTs).getTime();
+    const e = endTs ? new Date(endTs).getTime() : Date.now();
+    const diffSec = Math.max(0, Math.floor((e - s) / 1000));
+    const h = Math.floor(diffSec / 3600);
+    const m = Math.floor((diffSec % 3600) / 60);
+    const sec = diffSec % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  } catch {
+    return '';
+  }
+}
+
 /* Render Virtual Trading */
 function renderVirtual() {
   const v = lastData?.virtual || {};
@@ -793,40 +848,58 @@ function renderVirtual() {
 
   $('#vtToggle').textContent = `S1: ${v.enabled === false ? 'OFF' : 'ON'}`;
 
-  const openBody = (v.open || []).map(t => `
+  const openBody = (v.open || []).map(t => {
+    const elapsed = calcDuration(t.entryTs);
+    return `
     <tr>
       <td class="stock-cell"><span class="badge ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span> ${esc(t.name)}</td>
+      <td>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px">${formatTimeStr(t.entryTs)} IST</span>
+        ${elapsed ? `<div class="small" style="color:#6ea8fe">⏱ ${elapsed}</div>` : ''}
+      </td>
       <td>₹${fmt(t.entryPrice)}</td>
       <td>${t.remainingQty || t.qty} shs</td>
       <td>₹${fmt(t.stopLoss)}</td>
       <td>₹${fmt(t.target1)}</td>
       <td><span class="badge open">${t.partialDone ? 'PARTIAL' : 'OPEN'}</span></td>
-    </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;padding:14px">No open positions</td></tr>';
-  $('#vtOpen').innerHTML = `<table><thead><tr><th class="stock-head">Pos</th><th>Entry</th><th>Qty</th><th>SL</th><th>T1</th><th>Status</th></tr></thead><tbody>${openBody}</tbody></table>`;
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:14px">No open positions</td></tr>';
+  $('#vtOpen').innerHTML = `<table><thead><tr><th class="stock-head">Pos</th><th>Entry Time</th><th>Entry (₹)</th><th>Qty</th><th>SL</th><th>T1</th><th>Status</th></tr></thead><tbody>${openBody}</tbody></table>`;
 
-  const sigBody = (v.signals || []).map(s => `
+  const sigBody = (v.signals || []).map(s => {
+    const sigTime = formatTimeStr(s.time || s.ts);
+    return `
     <tr>
       <td class="stock-cell">${esc(s.name)} <span class="small">#${s.rank ?? '—'}</span></td>
+      <td><span style="font-family:'JetBrains Mono',monospace;font-size:11px">${sigTime !== '—' ? sigTime : '09:50+'}</span></td>
       <td>${s.pass ? `<span class="badge ${s.side === 'BUY' ? 'buy' : 'sell'}">${s.side}</span>` : '<span class="badge closed">PASS</span>'}</td>
       <td class="small">${esc((s.notes || []).slice(0, 2).join(' · '))}</td>
-    </tr>`).join('') || '<tr><td colspan="3" style="text-align:center;padding:14px">No signals yet (Active 09:50–11:00 IST)</td></tr>';
-  $('#vtSignals').innerHTML = `<table><thead><tr><th class="stock-head">Signal</th><th>Result</th><th>Notes</th></tr></thead><tbody>${sigBody}</tbody></table>`;
+    </tr>`;
+  }).join('') || '<tr><td colspan="4" style="text-align:center;padding:14px">No signals yet (Active 09:50–11:00 IST)</td></tr>';
+  $('#vtSignals').innerHTML = `<table><thead><tr><th class="stock-head">Signal</th><th>Time</th><th>Result</th><th>Notes</th></tr></thead><tbody>${sigBody}</tbody></table>`;
 
   const clBody = closedTrades.map(t => {
     const gross = t.grossPnl != null ? t.grossPnl : (t.pnl || 0);
     const taxes = t.taxes != null ? t.taxes : 0;
     const net = t.netPnl != null ? t.netPnl : (t.pnl || 0);
+    const duration = calcDuration(t.entryTs, t.exitTs);
     return `
       <tr>
         <td class="stock-cell"><span class="badge ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span> ${esc(t.name)}</td>
+        <td>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#c9d1d9">
+            ${formatTimeStr(t.entryTs)} ➔ ${formatTimeStr(t.exitTs)} IST
+          </div>
+          ${duration ? `<div class="small" style="color:#8b949e">⏱ ${duration}</div>` : ''}
+        </td>
         <td>₹${fmt(t.entryPrice)} → ₹${fmt(t.exitPrice)} (${t.qty} shs)</td>
         <td>₹${fmt(gross, 2)}</td>
         <td class="small" style="color:#ffb84d">₹${fmt(taxes, 2)}</td>
         <td class="${net >= 0 ? 'up' : 'down'}"><b>${net >= 0 ? '+' : ''}₹${fmt(net, 2)}</b></td>
-        <td class="small">${esc(t.exitReason || '')}</td>
+        <td><span class="badge closed">${esc(t.exitReason || 'CLOSED')}</span></td>
       </tr>`;
-  }).join('') || '<tr><td colspan="6" style="text-align:center;padding:14px">No closed trades today</td></tr>';
-  $('#vtClosed').innerHTML = `<table><thead><tr><th class="stock-head">Trade</th><th>Entry → Exit</th><th>Gross PnL</th><th>Taxes</th><th>Net PnL</th><th>Reason</th></tr></thead><tbody>${clBody}</tbody></table>`;
+  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:14px">No closed trades today</td></tr>';
+  $('#vtClosed').innerHTML = `<table><thead><tr><th class="stock-head">Trade</th><th>Timing (Entry ➔ Exit)</th><th>Prices</th><th>Gross PnL</th><th>Taxes</th><th>Net PnL</th><th>Reason</th></tr></thead><tbody>${clBody}</tbody></table>`;
 }
 
 function renderLogs(data) {

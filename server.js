@@ -351,15 +351,15 @@ async function updateVirtualTradeDb(trade) {
   }
 }
 
-async function loadOpenVirtualFromDb() {
+async function loadVirtualTradesFromDb() {
   if (!pool) return;
   try {
     const today = istToday();
-    const { rows } = await pool.query(
+    const { rows: openRows } = await pool.query(
       `SELECT * FROM virtual_trades WHERE trading_date=$1 AND status='OPEN' ORDER BY entry_ts`,
       [today]
     );
-    state.virtual.open = rows.map(r => ({
+    state.virtual.open = openRows.map(r => ({
       id: r.id,
       strategy: r.strategy || 'S1',
       tradingDate: toISODate(r.trading_date),
@@ -381,15 +381,48 @@ async function loadOpenVirtualFromDb() {
       checks: r.checks,
       notes: r.notes
     }));
+
+    const { rows: closedRows } = await pool.query(
+      `SELECT * FROM virtual_trades WHERE trading_date=$1 AND status='CLOSED' ORDER BY exit_ts DESC, entry_ts DESC`,
+      [today]
+    );
+    state.virtual.closed = closedRows.map(r => ({
+      id: r.id,
+      strategy: r.strategy || 'S1',
+      tradingDate: toISODate(r.trading_date),
+      side: r.side,
+      key: normalizeKey(r.symbol || r.name),
+      symbol: r.symbol,
+      name: r.name,
+      sector: r.sector,
+      entryTs: r.entry_ts,
+      entryPrice: Number(r.entry_price),
+      exitTs: r.exit_ts,
+      exitPrice: Number(r.exit_price),
+      exitReason: r.exit_reason,
+      grossPnl: Number(r.gross_pnl ?? r.pnl ?? 0),
+      taxes: Number(r.taxes ?? 0),
+      netPnl: Number(r.pnl ?? 0),
+      pnl: Number(r.pnl ?? 0),
+      qty: Number(r.qty),
+      status: 'CLOSED',
+      checks: r.checks,
+      notes: r.notes
+    }));
+
     const { rows: cnt } = await pool.query(
       `SELECT COUNT(*)::int AS c FROM virtual_trades WHERE trading_date=$1`,
       [today]
     );
-    state.virtual.tradesToday = cnt[0]?.c || state.virtual.open.length;
+    state.virtual.tradesToday = cnt[0]?.c || (state.virtual.open.length + state.virtual.closed.length);
     state.virtual.dayKey = today;
   } catch (e) {
-    log(`Load open virtual trades: ${e.message}`, 'warn');
+    log(`Load virtual trades: ${e.message}`, 'warn');
   }
+}
+
+async function loadOpenVirtualFromDb() {
+  return await loadVirtualTradesFromDb();
 }
 
 async function saveSnapshot(date, time, side, rows) {
@@ -515,6 +548,13 @@ function istParts(date = new Date()) {
 }
 
 function istToday() { return istParts().date; }
+
+function currentIstBucket() {
+  const now = istParts();
+  const minute = Number(now.time.slice(3, 5));
+  const bucketMin = minute - (minute % 5);
+  return `${now.time.slice(0, 2)}:${String(bucketMin).padStart(2, '0')}`;
+}
 
 function toISODate(d) {
   if (typeof d === 'string') return d.slice(0, 10);
@@ -643,6 +683,22 @@ function calcDurationStr(startTs, endTs) {
 }
 
 /* ---------- FYERS Authentication & REST API Communication ---------- */
+function isJwtExpired(token) {
+  if (!token) return true;
+  try {
+    const raw = token.includes(':') ? token.split(':')[1] : token;
+    const parts = raw.split('.');
+    if (parts.length >= 2) {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      if (payload && typeof payload.exp === 'number') {
+        // Expired if current time is past exp (with a 30s buffer)
+        return Date.now() >= (payload.exp * 1000) - 30000;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 function getFyersAuth(rawAppId, rawToken) {
   let appId = String(rawAppId || '').trim();
   let token = String(rawToken || '').trim().replace(/^(?:bearer)\s+/i, '').trim();
@@ -685,14 +741,100 @@ function fyersHeaders(appId, token) {
   };
 }
 
+/* ---------- Global FYERS REST Rate Limiter & Request Queue ---------- */
+const fyersRestQueue = [];
+let fyersRestPumping = false;
+let fyersRateLimitBlockedUntil = 0;
+let fyersLastRequestTimestamp = 0;
+const FYERS_MIN_REQUEST_GAP_MS = 180; // ~5.5 requests/sec max safe throughput
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function fyersGet(base, endpoint, params, appId, token) {
-  const u = new URL(base + endpoint);
-  for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, String(v));
-  const res = await axios.get(u.toString(), {
-    headers: fyersHeaders(appId, token),
-    timeout: 10000
+  return new Promise((resolve, reject) => {
+    fyersRestQueue.push({
+      base,
+      endpoint,
+      params,
+      appId,
+      token,
+      attempt: 1,
+      resolve,
+      reject
+    });
+    pumpFyersRestQueue();
   });
-  return res.data;
+}
+
+async function pumpFyersRestQueue() {
+  if (fyersRestPumping) return;
+  fyersRestPumping = true;
+
+  while (fyersRestQueue.length > 0) {
+    const now = Date.now();
+    if (now < fyersRateLimitBlockedUntil) {
+      await sleep(fyersRateLimitBlockedUntil - now);
+    }
+
+    const elapsed = Date.now() - fyersLastRequestTimestamp;
+    if (elapsed < FYERS_MIN_REQUEST_GAP_MS) {
+      await sleep(FYERS_MIN_REQUEST_GAP_MS - elapsed);
+    }
+
+    const item = fyersRestQueue.shift();
+    if (!item) break;
+
+    fyersLastRequestTimestamp = Date.now();
+
+    try {
+      const u = new URL(item.base + item.endpoint);
+      for (const [k, v] of Object.entries(item.params || {})) {
+        u.searchParams.set(k, String(v));
+      }
+      const res = await axios.get(u.toString(), {
+        headers: fyersHeaders(item.appId, item.token),
+        timeout: 12000
+      });
+      item.resolve(res.data);
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 429) {
+        let backoffMs = 2500 * Math.pow(2, item.attempt - 1) + Math.floor(Math.random() * 800);
+        const retryAfterHeader = err.response?.headers?.['retry-after'];
+        if (retryAfterHeader) {
+          const parsedSec = Number(retryAfterHeader);
+          if (Number.isFinite(parsedSec) && parsedSec > 0) {
+            backoffMs = Math.max(backoffMs, parsedSec * 1000);
+          }
+        }
+        backoffMs = Math.min(30000, backoffMs);
+
+        fyersRateLimitBlockedUntil = Date.now() + backoffMs;
+        log(`[FYERS-LIMITER] HTTP 429 Rate limit hit on ${item.endpoint}. Pausing FYERS REST calls for ${(backoffMs / 1000).toFixed(1)}s (retry ${item.attempt}/3)…`, 'warn');
+
+        if (item.attempt < 3) {
+          item.attempt++;
+          fyersRestQueue.unshift(item);
+        } else {
+          item.reject(new Error(`FYERS REST rate limit exceeded (429) after ${item.attempt} retries: ${err.message}`));
+        }
+      } else if (err.code === 'ECONNABORTED' || (status && status >= 500 && status < 600)) {
+        if (item.attempt < 2) {
+          item.attempt++;
+          fyersRestQueue.unshift(item);
+          await sleep(1000);
+        } else {
+          item.reject(err);
+        }
+      } else {
+        item.reject(err);
+      }
+    }
+  }
+
+  fyersRestPumping = false;
 }
 
 /* ---------- Universe Initialization from Script Master ---------- */
@@ -777,14 +919,20 @@ async function ensureUniverse() {
 }
 
 /* ---------- Quote Fetching (FYERS Data API v3) ---------- */
+let isRefreshingQuotes = false;
+
 async function fetchQuotes(symbols, appId, token) {
   const out = [];
   const chunk = 50; // FYERS supports up to 50 symbols per request
+  let totalChunks = 0;
+  let failedChunks = 0;
+
   for (let i = 0; i < symbols.length; i += chunk) {
+    totalChunks++;
     const batch = symbols.slice(i, i + chunk);
     try {
       const d = await fyersGet(DATA_HOST, '/quotes', { symbols: batch.join(',') }, appId, token);
-      const arr = d.d || d.data || [];
+      const arr = d?.d || d?.data || [];
       for (const row of arr) {
         const v = row.v || row;
         const sym = row.n || v.symbol || '';
@@ -804,23 +952,25 @@ async function fetchQuotes(symbols, appId, token) {
         }
       }
     } catch (err) {
-      log(`FYERS quote fetch chunk error: ${err.message}`, 'warn');
+      failedChunks++;
+      log(`FYERS quote fetch chunk error (${batch.length} syms): ${err.message}`, 'warn');
     }
   }
-  return out;
+  return { quotes: out, totalChunks, failedChunks, success: out.length > 0 };
 }
 
 async function seedInitialQuotes(appId, token) {
   if (!appId || !token) {
     if (state.live.size < 50) loadSeedHistory();
-    return;
+    return 0;
   }
   const universe = await ensureUniverse();
   try {
     const syms = universe.map(s => s.symbol).concat(INDEX_CONFIG.map(x => x.symbol));
-    const qs = await fetchQuotes(syms, appId, token);
+    const result = await fetchQuotes(syms, appId, token);
+    const qs = result.quotes || [];
     const nowSec = Date.now() / 1000;
-    if (qs && qs.length > 0) {
+    if (qs.length > 0) {
       for (const q of qs) {
         if (INDEX_CONFIG.some(x => x.symbol === q.symbol)) {
           state.indices.set(q.symbol, { ...q, ts: nowSec });
@@ -829,28 +979,47 @@ async function seedInitialQuotes(appId, token) {
         }
       }
       state.lastQuoteRefreshAt = Date.now();
-      log(`Seeded live quotes for ${qs.length}/${universe.length} symbols. Quote age: ${liveDataAgeSec().toFixed(0)}s.`);
+      log(`Seeded live quotes for ${qs.length}/${universe.length} symbols. Quote age: 0s.`);
+      return qs.length;
     } else {
+      log(`Quote seed warning: FYERS returned 0 quotes (${result.failedChunks}/${result.totalChunks} chunks failed).`, 'warn');
       if (state.live.size < 50) {
-        log('FYERS returned 0 quotes. Populating quotes from seed data.', 'warn');
+        log('Populating quotes from seed data.', 'warn');
         loadSeedHistory();
       }
+      return 0;
     }
   } catch (err) {
     log(`Quote seed warning: ${err.message}`, 'warn');
     if (state.live.size < 50) loadSeedHistory();
+    return 0;
   }
 }
 
 async function refreshLiveQuotes(reason = 'refresh') {
   if (!state.fyers.appId || !state.fyers.token) return false;
+  if (isJwtExpired(state.fyers.token)) return false;
+  if (isRefreshingQuotes) return false;
+  if (Date.now() < fyersRateLimitBlockedUntil) {
+    log(`Quote refresh skipped (${reason}): rate-limit cooldown active for ${Math.ceil((fyersRateLimitBlockedUntil - Date.now()) / 1000)}s. Existing quote age: ${liveDataAgeSec().toFixed(0)}s.`, 'warn');
+    return false;
+  }
+
+  isRefreshingQuotes = true;
   try {
-    await seedInitialQuotes(state.fyers.appId, state.fyers.token);
-    log(`Live quotes refreshed (${reason}); age now ${liveDataAgeSec().toFixed(0)}s.`);
-    return true;
+    const count = await seedInitialQuotes(state.fyers.appId, state.fyers.token);
+    if (count > 0) {
+      log(`Live quotes refreshed (${reason}); age now ${liveDataAgeSec().toFixed(0)}s.`);
+      return true;
+    } else {
+      log(`Live quote refresh failed (${reason}): no fresh quotes received (rate-limited / network). Preserving previous prices (age: ${liveDataAgeSec().toFixed(0)}s).`, 'warn');
+      return false;
+    }
   } catch (e) {
     log(`Quote refresh failed (${reason}): ${e.message}`, 'warn');
     return false;
+  } finally {
+    isRefreshingQuotes = false;
   }
 }
 
@@ -1174,31 +1343,55 @@ async function fetchHistorical5m(stock, appId, token, fromDateStr, toDateStr = n
 let wsReconnectAttempt = 0;
 let wsConnecting = false;
 
+function purgeFyersDataSocketCache() {
+  try {
+    for (const modPath of Object.keys(require.cache)) {
+      if (modPath.includes('fyers-api-v3')) {
+        delete require.cache[modPath];
+      }
+    }
+    fyersDataSocket = require('fyers-api-v3').fyersDataSocket;
+  } catch (e) {
+    log(`Notice reloading fyers-api-v3: ${e.message}`, 'warn');
+  }
+}
+
 function startFyersSocket() {
   if (!state.fyers.appId || !state.fyers.token) return;
+  const auth = getFyersAuth(state.fyers.appId, state.fyers.token);
+  state.fyers.appId = auth.appId;
+  state.fyers.token = auth.token;
+
+  if (isJwtExpired(auth.token)) {
+    log('FYERS access token has EXPIRED. Market data WebSocket cannot start. Please re-login with an active token.', 'warn');
+    state.fyers.connected = false;
+    wsConnecting = false;
+    clearTimeout(state.fyers.reconnectTimer);
+    return;
+  }
+
   if (wsConnecting) return;
   wsConnecting = true;
   clearTimeout(state.fyers.reconnectTimer);
+
+  try {
+    if (state.fyers.socket) {
+      try {
+        state.fyers.socket.removeAllListeners?.();
+        state.fyers.socket.close?.();
+      } catch {}
+      state.fyers.socket = null;
+    }
+  } catch {}
+
+  // Evict cached DataSocket singleton instance so the new socket uses the updated token
+  purgeFyersDataSocketCache();
 
   if (!fyersDataSocket) {
     log('fyersDataSocket not available; WebSocket disabled.', 'warn');
     wsConnecting = false;
     return;
   }
-
-  try {
-    if (state.fyers.socket) {
-      try {
-        state.fyers.socket.removeAllListeners?.();
-        state.fyers.socket.close();
-      } catch {}
-      state.fyers.socket = null;
-    }
-  } catch {}
-
-  const auth = getFyersAuth(state.fyers.appId, state.fyers.token);
-  state.fyers.appId = auth.appId;
-  state.fyers.token = auth.token;
 
   let skt;
   try {
@@ -1224,14 +1417,17 @@ function startFyersSocket() {
       ...state.universe.map(x => x.symbol)
     ].slice(0, 195);
 
-    try {
-      for (let i = 0; i < symbols.length; i += 50) {
-        skt.subscribe(symbols.slice(i, i + 50));
+    // Give socket handshake 350ms before subscribing
+    setTimeout(() => {
+      if (!state.fyers.connected || !state.fyers.socket) return;
+      try {
+        skt.subscribe(symbols);
+        log(`Subscribed to ${symbols.length} symbols on FYERS stream.`);
+      } catch (e) {
+        log(`Subscribe error: ${e.message}`, 'warn');
       }
-      log(`Subscribed to ${symbols.length} symbols on FYERS stream.`);
-    } catch (e) {
-      log(`Subscribe error: ${e.message}`, 'warn');
-    }
+    }, 350);
+
     broadcastDashboard();
   });
 
@@ -1256,6 +1452,12 @@ function startFyersSocket() {
   skt.on('error', err => {
     const s = typeof err === 'string' ? err : JSON.stringify(err);
     log(`FYERS WebSocket error: ${s}`, 'warn');
+    if (err && (err.code === -15 || String(err.message || '').includes('token'))) {
+      log('FYERS WebSocket authentication failed. Token may be expired or invalid. Disabling auto-reconnect until new credentials are provided.', 'warn');
+      clearTimeout(state.fyers.reconnectTimer);
+      state.fyers.connected = false;
+      wsConnecting = false;
+    }
   });
 
   skt.on('close', () => {
@@ -1276,6 +1478,10 @@ function startFyersSocket() {
 
 function scheduleWsReconnect() {
   if (!state.fyers.appId || !state.fyers.token) return;
+  if (isJwtExpired(state.fyers.token)) {
+    log('FYERS token expired. Skipping WebSocket reconnect.', 'warn');
+    return;
+  }
   if (!marketOpenNow()) {
     state.fyers.connected = false;
     wsConnecting = false;
@@ -1286,7 +1492,7 @@ function scheduleWsReconnect() {
   const delay = Math.min(60000, 10000 * wsReconnectAttempt);
   log(`Scheduling FYERS WebSocket reconnect in ${delay / 1000}s…`);
   state.fyers.reconnectTimer = setTimeout(() => {
-    if (state.fyers.appId && state.fyers.token) {
+    if (state.fyers.appId && state.fyers.token && !isJwtExpired(state.fyers.token)) {
       startFyersSocket();
     }
   }, delay);
@@ -1404,7 +1610,16 @@ function mergeRows(type, liveRanked) {
   const baseLMap = new Map((baseSnap.losers || []).map(x => [normalizeKey(x.key), x.rank]));
   const totalUniverse = Math.max(state.universe.length, 212);
 
-  const times = [...state.history.keys()].filter(t => t !== 'CLOSE').sort();
+  const nowParts = istParts();
+  const currentBucket = currentIstBucket();
+  const today = istToday();
+  const isViewingToday = (state.displayDate || state.currentDay || today) === today;
+
+  let times = [...state.history.keys()].filter(t => t !== 'CLOSE' && t >= '09:20').sort();
+  // If viewing today's live session, strictly cap times to the present 5-minute bucket
+  if (isViewingToday && nowParts.time <= '15:30') {
+    times = times.filter(t => t <= currentBucket);
+  }
   const rankMaps = new Map(
     times.map(t => {
       const snap = state.history.get(t) || {};
@@ -1519,10 +1734,11 @@ async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll =
   const now = istParts();
   const targetDate = forceDate || now.date;
   let upto = '15:30';
-  if (targetDate === now.date && marketOpenNow()) {
-    const min = Number(now.time.slice(3, 5));
-    const bucketMin = min - (min % 5);
-    upto = `${now.time.slice(0, 2)}:${String(bucketMin).padStart(2, '0')}`;
+  if (targetDate === now.date) {
+    if (now.time < '09:20') return; // Market day hasn't started yet
+    if (now.time <= '15:30') {
+      upto = currentIstBucket();
+    }
   }
 
   const expected = expectedRankTimes(upto);
@@ -1536,8 +1752,12 @@ async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll =
     const universe = await ensureUniverse();
     const stockPriceTimelines = new Map();
 
-    const batchSize = 25;
+    const batchSize = 3;
     for (let i = 0; i < universe.length; i += batchSize) {
+      if (Date.now() < fyersRateLimitBlockedUntil) {
+        log(`[REBUILD] Gap-fill paused: FYERS rate limit active. Waiting before scanning further…`, 'warn');
+        await sleep(Math.max(1000, fyersRateLimitBlockedUntil - Date.now()));
+      }
       const slice = universe.slice(i, i + batchSize);
       await Promise.all(slice.map(async st => {
         try {
@@ -1546,7 +1766,10 @@ async function checkAndGapFillHistory(appId, token, forceDate = null, forceAll =
           stockPriceTimelines.set(st.key, { stock: st, prev, candles });
         } catch {}
       }));
-      log(`[REBUILD] 5m candles scanned for ${Math.min(i + batchSize, universe.length)}/${universe.length} equities…`);
+      await sleep(100);
+      if (i > 0 && i % 30 === 0) {
+        log(`[REBUILD] 5m candles scanned for ${Math.min(i + batchSize, universe.length)}/${universe.length} equities…`);
+      }
     }
 
     for (const t of intervalsToFill) {
@@ -1611,7 +1834,15 @@ async function makeCandleSnapshot() {
   if (minute % 5 !== 0 && minute % 5 > 1) return;
   const bucketMin = minute - (minute % 5);
   const t = `${now.time.slice(0, 2)}:${String(bucketMin).padStart(2, '0')}`;
-  if (t < '09:20' || t > '15:30' || state.history.has(t)) return;
+  if (t < '09:20' || t > '15:30') return;
+
+  if (state.currentDay !== now.date) {
+    state.history.clear();
+    state.currentDay = now.date;
+    state.displayDate = now.date;
+  }
+
+  if (state.history.has(t) && state.history.get(t)?.gainers?.length >= 30) return;
 
   if (liveDataAgeSec() > 90 || liveRows().length < state.universe.length * 0.4) {
     await refreshLiveQuotes(`snapshot-${t}`);
@@ -2335,13 +2566,23 @@ async function route(req, res) {
         return send(res, 400, { ok: false, error: 'Both App ID and Access Token are required.' });
       }
 
+      if (isJwtExpired(token)) {
+        return send(res, 400, { ok: false, error: 'The provided access token has expired. Please generate a fresh token from the FYERS API Dashboard.' });
+      }
+
       state.fyers.appId = appId;
       state.fyers.token = token;
       log('FYERS credentials updated via browser.');
 
       await saveSessionToDb(appId, token);
+      if (state.currentDay !== istToday() || state.displayDate !== istToday()) {
+        state.history.clear();
+        state.currentDay = istToday();
+        state.displayDate = istToday();
+        await loadDbHistory(istToday());
+      }
       await ensureUniverse();
-      await loadOpenVirtualFromDb();
+      await loadVirtualTradesFromDb();
       await seedInitialQuotes(appId, token);
       startFyersSocket();
       checkAndGapFillHistory(appId, token).catch(() => {});
@@ -2352,9 +2593,15 @@ async function route(req, res) {
     if (u.pathname === '/api/logout' && req.method === 'POST') {
       state.fyers.appId = '';
       state.fyers.token = '';
+      clearTimeout(state.fyers.reconnectTimer);
       if (state.fyers.socket) {
-        try { state.fyers.socket.close(); } catch {}
+        try {
+          state.fyers.socket.removeAllListeners?.();
+          state.fyers.socket.close?.();
+        } catch {}
+        state.fyers.socket = null;
       }
+      purgeFyersDataSocketCache();
       if (pool) {
         try { await pool.query("DELETE FROM server_sessions WHERE broker = 'fyers'"); } catch {}
       }
@@ -2367,7 +2614,7 @@ async function route(req, res) {
       let hToken = req.headers['x-fyers-access-token'] || req.headers['authorization'];
       if (hToken) hToken = hToken.replace(/^(?:bearer)\s+/i, '').trim();
 
-      if (hAppId && hToken && (!state.fyers.appId || !state.fyers.token)) {
+      if (hAppId && hToken && !isJwtExpired(hToken) && (!state.fyers.appId || !state.fyers.token || state.fyers.token !== hToken)) {
         state.fyers.appId = hAppId;
         state.fyers.token = hToken;
         await ensureUniverse();
@@ -2607,6 +2854,7 @@ setInterval(() => {
 setInterval(() => {
   if (!state.fyers.appId || !state.fyers.token) return;
   if (!marketOpenNow()) return;
+  if (isJwtExpired(state.fyers.token)) return;
   if (!state.fyers.connected || liveDataAgeSec() > 75) {
     refreshLiveQuotes(state.fyers.connected ? 'stale' : 'ws-down')
       .then(ok => {
@@ -2640,20 +2888,26 @@ setInterval(() => {
     await ensureUniverse();
     await loadVirtualAccountFromDb();
     await loadDbHistory(istToday());
-    if (state.history.size === 0) {
+    state.currentDay = istToday();
+    state.displayDate = istToday();
+    if (state.history.size === 0 && !marketOpenNow() && !isPreOpenSession()) {
       loadSeedHistory();
     }
-    await loadOpenVirtualFromDb();
+    await loadVirtualTradesFromDb();
 
     // Check saved session in DB first
     const savedSession = await loadSessionFromDb();
     if (savedSession && !state.fyers.token) {
-      state.fyers.appId = savedSession.appId;
-      state.fyers.token = savedSession.token;
-      log('Restored FYERS background session credentials from database.');
+      if (isJwtExpired(savedSession.token)) {
+        log('Restored FYERS session from DB is EXPIRED. Awaiting fresh credentials from browser.', 'warn');
+      } else {
+        state.fyers.appId = savedSession.appId;
+        state.fyers.token = savedSession.token;
+        log('Restored active FYERS session credentials from database.');
+      }
     }
 
-    if (state.fyers.appId && state.fyers.token) {
+    if (state.fyers.appId && state.fyers.token && !isJwtExpired(state.fyers.token)) {
       log('Bootstrapping FYERS background session…');
       await seedInitialQuotes(state.fyers.appId, state.fyers.token);
       startFyersSocket();
